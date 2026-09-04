@@ -129,22 +129,146 @@ struct SynologyClient {
         return files.map(\.fileItem).sortedByKindAndName()
     }
 
-    func downloadURL(for path: String) throws -> URL {
+    func loadFavorites(api: SynologyAPIInfo) async throws -> [SynologyFileItem] {
+        let url = try makeAPIURL(
+            api: api,
+            method: "list",
+            version: min(api.maxVersion, 2),
+            parameters: [
+                URLQueryItem(name: "limit", value: "0"),
+                URLQueryItem(name: "offset", value: "0"),
+                URLQueryItem(name: "status_filter", value: "valid"),
+                URLQueryItem(name: "additional", value: "[\"real_path\",\"size\",\"owner\",\"time\",\"type\"]")
+            ],
+            includeSession: true
+        )
+
+        let response: SynologyFavoriteListResponse = try await request(url)
+        guard response.success, let favorites = response.data?.favorites else {
+            throw SynologyClientError.apiError(response.error?.code, apiName: api.name)
+        }
+
+        return favorites.map(\.fileItem).sortedByKindAndName()
+    }
+
+    func rename(api: SynologyAPIInfo, item: SynologyFileItem, newName: String) async throws {
+        let url = try makeAPIURL(
+            api: api,
+            method: "rename",
+            version: api.maxVersion,
+            parameters: [
+                URLQueryItem(name: "path", value: try jsonEncodedString([item.path])),
+                URLQueryItem(name: "name", value: try jsonEncodedString([newName]))
+            ],
+            includeSession: true
+        )
+
+        let response: SynologyFileOperationResponse = try await request(url)
+        guard response.success else {
+            throw SynologyClientError.apiError(response.error?.code, apiName: api.name)
+        }
+    }
+
+    func move(api: SynologyAPIInfo, items: [SynologyFileItem], destinationFolderPath: String) async throws {
+        let url = try makeAPIURL(
+            api: api,
+            method: "start",
+            version: min(api.maxVersion, 3),
+            parameters: [
+                URLQueryItem(name: "path", value: try jsonEncodedString(items.map(\.path))),
+                URLQueryItem(name: "dest_folder_path", value: try jsonEncodedString(destinationFolderPath)),
+                URLQueryItem(name: "remove_src", value: "true"),
+                URLQueryItem(name: "accurate_progress", value: "true")
+            ],
+            includeSession: true
+        )
+
+        let response: SynologyFileOperationResponse = try await request(url)
+        guard response.success, let taskID = response.data?.taskid, !taskID.isEmpty else {
+            throw SynologyClientError.apiError(response.error?.code, apiName: api.name)
+        }
+
+        try await waitForOperationCompletion(api: api, taskID: taskID)
+    }
+
+    func delete(api: SynologyAPIInfo, items: [SynologyFileItem]) async throws {
+        let url = try makeAPIURL(
+            api: api,
+            method: "start",
+            version: min(api.maxVersion, 2),
+            parameters: [
+                URLQueryItem(name: "path", value: try jsonEncodedString(items.map(\.path))),
+                URLQueryItem(name: "accurate_progress", value: "true"),
+                URLQueryItem(name: "recursive", value: "true")
+            ],
+            includeSession: true
+        )
+
+        let response: SynologyFileOperationResponse = try await request(url)
+        guard response.success, let taskID = response.data?.taskid, !taskID.isEmpty else {
+            throw SynologyClientError.apiError(response.error?.code, apiName: api.name)
+        }
+
+        try await waitForOperationCompletion(api: api, taskID: taskID)
+    }
+
+    func downloadURL(api: SynologyAPIInfo?, for path: String) throws -> URL {
         guard sessionID != nil else {
             throw SynologyClientError.notAuthenticated
         }
 
-        return try makeURL(
-            path: "entry.cgi",
-            queryItems: [
-                URLQueryItem(name: "api", value: "SYNO.FileStation.Download"),
-                URLQueryItem(name: "version", value: "2"),
-                URLQueryItem(name: "method", value: "download"),
-                URLQueryItem(name: "path", value: path),
-                URLQueryItem(name: "mode", value: "open"),
-                URLQueryItem(name: "_sid", value: sessionID)
-            ]
-        )
+        let parameters = [
+            URLQueryItem(name: "path", value: "[\"\(path)\"]"),
+            URLQueryItem(name: "mode", value: "open")
+        ]
+
+        if let api {
+            return try makeAPIURL(
+                api: api,
+                method: "download",
+                version: api.maxVersion,
+                parameters: parameters,
+                includeSession: true
+            )
+        }
+
+        var queryItems = [
+            URLQueryItem(name: "api", value: "SYNO.FileStation.Download"),
+            URLQueryItem(name: "version", value: "2"),
+            URLQueryItem(name: "method", value: "download")
+        ]
+        queryItems.append(contentsOf: parameters)
+
+        if let sessionID {
+            queryItems.append(URLQueryItem(name: "_sid", value: sessionID))
+        }
+
+        return try makeURL(path: "entry.cgi", queryItems: queryItems)
+    }
+
+    private func waitForOperationCompletion(api: SynologyAPIInfo, taskID: String) async throws {
+        for _ in 0..<12 {
+            let url = try makeAPIURL(
+                api: api,
+                method: "status",
+                version: min(api.maxVersion, 3),
+                parameters: [
+                    URLQueryItem(name: "taskid", value: try jsonEncodedString(taskID))
+                ],
+                includeSession: true
+            )
+
+            let response: SynologyFileOperationResponse = try await request(url)
+            guard response.success else {
+                throw SynologyClientError.apiError(response.error?.code, apiName: api.name)
+            }
+
+            if response.data?.finished == true {
+                return
+            }
+
+            try await Task.sleep(for: .milliseconds(500))
+        }
     }
 
     private static func webAPIBaseURL(from inputURL: URL) throws -> URL {
@@ -208,6 +332,15 @@ struct SynologyClient {
         }
 
         return finalURL
+    }
+
+    private func jsonEncodedString<T: Encodable>(_ value: T) throws -> String {
+        let data = try JSONEncoder().encode(value)
+        guard let string = String(data: data, encoding: .utf8) else {
+            throw SynologyClientError.decodingFailed
+        }
+
+        return string
     }
 
     private func request<Response: Decodable>(_ url: URL) async throws -> Response {

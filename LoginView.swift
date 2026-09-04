@@ -9,7 +9,6 @@ struct LoginView: View {
     @Binding var otpCode: String
     @Binding var trustsThisDevice: Bool
     let isLoading: Bool
-    let statusMessage: String
     let selectServerAction: (String) -> Void
     let loginAction: () -> Void
     let loginWithOTPAction: () -> Void
@@ -67,11 +66,6 @@ struct LoginView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .disabled(isLoading || serverURLString.isEmpty || account.isEmpty || password.isEmpty)
-
-                    Label(statusMessage, systemImage: isLoading ? "hourglass" : "info.circle")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(20)
                 .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))

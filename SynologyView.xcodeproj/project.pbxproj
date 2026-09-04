@@ -6,8 +6,29 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		C330F6A3304A906E0025FA9A /* SynologyModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6A2304A906E0025FA9A /* SynologyModels.swift */; };
+		C330F6A5304A906E0025FA9A /* LoginSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6A4304A906E0025FA9A /* LoginSettingsStore.swift */; };
+		C330F6A7304A906F0025FA9A /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6A6304A906F0025FA9A /* LoginView.swift */; };
+		C330F6A9304A90BD0025FA9A /* FileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6A8304A90BD0025FA9A /* FileBrowserView.swift */; };
+		C330F6AB304A90BD0025FA9A /* MediaPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6AA304A90BD0025FA9A /* MediaPreviewView.swift */; };
+		C330F6AD304A90BE0025FA9A /* SynologyClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6AC304A90BE0025FA9A /* SynologyClient.swift */; };
+		C330F6AF304A90E80025FA9A /* SynologyViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6AE304A90E80025FA9A /* SynologyViewModel.swift */; };
+		C330F6B1304A96470025FA9A /* PlaybackProgressStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6B0304A96470025FA9A /* PlaybackProgressStore.swift */; };
+		C330F6B3304AA2080025FA9A /* FileOperationSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6B2304AA2080025FA9A /* FileOperationSettingsStore.swift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		C330F694304A7A710025FA9A /* SynologyView.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SynologyView.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C330F6A2304A906E0025FA9A /* SynologyModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SynologyModels.swift; sourceTree = "<group>"; };
+		C330F6A4304A906E0025FA9A /* LoginSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginSettingsStore.swift; sourceTree = "<group>"; };
+		C330F6A6304A906F0025FA9A /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
+		C330F6A8304A90BD0025FA9A /* FileBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileBrowserView.swift; sourceTree = "<group>"; };
+		C330F6AA304A90BD0025FA9A /* MediaPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPreviewView.swift; sourceTree = "<group>"; };
+		C330F6AC304A90BE0025FA9A /* SynologyClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SynologyClient.swift; sourceTree = "<group>"; };
+		C330F6AE304A90E80025FA9A /* SynologyViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SynologyViewModel.swift; sourceTree = "<group>"; };
+		C330F6B0304A96470025FA9A /* PlaybackProgressStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackProgressStore.swift; sourceTree = "<group>"; };
+		C330F6B2304AA2080025FA9A /* FileOperationSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileOperationSettingsStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -34,6 +55,15 @@
 			children = (
 				C330F696304A7A710025FA9A /* SynologyView */,
 				C330F695304A7A710025FA9A /* Products */,
+				C330F6A2304A906E0025FA9A /* SynologyModels.swift */,
+				C330F6A4304A906E0025FA9A /* LoginSettingsStore.swift */,
+				C330F6A6304A906F0025FA9A /* LoginView.swift */,
+				C330F6A8304A90BD0025FA9A /* FileBrowserView.swift */,
+				C330F6AA304A90BD0025FA9A /* MediaPreviewView.swift */,
+				C330F6AC304A90BE0025FA9A /* SynologyClient.swift */,
+				C330F6AE304A90E80025FA9A /* SynologyViewModel.swift */,
+				C330F6B0304A96470025FA9A /* PlaybackProgressStore.swift */,
+				C330F6B2304AA2080025FA9A /* FileOperationSettingsStore.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -119,6 +149,15 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C330F6AB304A90BD0025FA9A /* MediaPreviewView.swift in Sources */,
+				C330F6AD304A90BE0025FA9A /* SynologyClient.swift in Sources */,
+				C330F6A3304A906E0025FA9A /* SynologyModels.swift in Sources */,
+				C330F6A5304A906E0025FA9A /* LoginSettingsStore.swift in Sources */,
+				C330F6B1304A96470025FA9A /* PlaybackProgressStore.swift in Sources */,
+				C330F6B3304AA2080025FA9A /* FileOperationSettingsStore.swift in Sources */,
+				C330F6A9304A90BD0025FA9A /* FileBrowserView.swift in Sources */,
+				C330F6AF304A90E80025FA9A /* SynologyViewModel.swift in Sources */,
+				C330F6A7304A906F0025FA9A /* LoginView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

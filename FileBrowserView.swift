@@ -26,7 +26,6 @@ struct FileBrowserView: View {
     let lastMoveDestinationPath: String
 
     @State private var selectedTab = FileBrowserTab.files
-    @State private var isMenuPresented = false
     @State private var isSelectionMode = false
     @State private var selectedItemIDs = Set<String>()
     @State private var renameItem: SynologyFileItem?
@@ -72,21 +71,31 @@ struct FileBrowserView: View {
                     Label("收藏夹", systemImage: "star")
                 }
                 .tag(FileBrowserTab.favorites)
+
+                CinemaPlaceholderView()
+                    .tabItem {
+                        Label("影院", systemImage: "film")
+                    }
+                    .tag(FileBrowserTab.cinema)
+
+                SettingsView(
+                    serverURLString: serverURLString,
+                    account: account,
+                    logoutAction: logoutAction
+                )
+                .tabItem {
+                    Label("设置", systemImage: "gearshape")
+                }
+                .tag(FileBrowserTab.settings)
             }
             .navigationTitle(navigationTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if isSelectionMode {
                         Button("取消") {
                             clearSelection()
-                        }
-                    } else {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                isMenuPresented = true
-                            }
-                        } label: {
-                            Label("菜单", systemImage: "line.3.horizontal")
                         }
                     }
                 }
@@ -110,10 +119,12 @@ struct FileBrowserView: View {
                         .disabled(isLoading)
                     }
 
-                    Button(isSelectionMode ? "完成" : "选择") {
-                        isSelectionMode ? clearSelection() : beginSelection()
+                    if supportsFileOperations {
+                        Button(isSelectionMode ? "完成" : "选择") {
+                            isSelectionMode ? clearSelection() : beginSelection()
+                        }
+                        .disabled(isLoading || visibleItems.isEmpty)
                     }
-                    .disabled(isLoading || visibleItems.isEmpty)
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -130,30 +141,6 @@ struct FileBrowserView: View {
                 }
             }
 
-            if isMenuPresented {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        isMenuPresented = false
-                    }
-                } label: {
-                    Color.black.opacity(0.28)
-                        .ignoresSafeArea()
-                }
-                .buttonStyle(.plain)
-
-                SideMenuView(
-                    serverURLString: serverURLString,
-                    account: account,
-                    logoutAction: {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            isMenuPresented = false
-                        }
-                        logoutAction()
-                    }
-                )
-                .transition(.move(edge: .leading))
-                .zIndex(1)
-            }
         }
         .onChange(of: selectedTab) {
             clearSelection()
@@ -188,17 +175,19 @@ struct FileBrowserView: View {
                 }
             )
         }
-        .confirmationDialog("确认删除", item: $deleteSelection) { selection in
-            Button("删除 \(selection.items.count) 个项目", role: .destructive) {
-                deleteAction(selection.items)
-                clearSelection()
-                deleteSelection = nil
-            }
+        .alert("确认删除", isPresented: deleteDialogBinding) {
             Button("取消", role: .cancel) {
                 deleteSelection = nil
             }
-        } message: { selection in
-            Text(selection.displayName)
+            Button("删除", role: .destructive) {
+                guard let deleteSelection else {
+                    return
+                }
+                deleteAction(deleteSelection.items)
+                clearSelection()
+            }
+        } message: {
+            Text("将删除 \(deleteSelection?.displayName ?? "")，此操作会同步到群晖。")
         }
     }
 
@@ -208,6 +197,10 @@ struct FileBrowserView: View {
             return title(for: currentPath, rootTitle: "文件")
         case .favorites:
             return title(for: favoriteCurrentPath, rootTitle: "收藏夹")
+        case .cinema:
+            return "影院"
+        case .settings:
+            return "设置"
         }
     }
 
@@ -217,6 +210,8 @@ struct FileBrowserView: View {
             return fileItems
         case .favorites:
             return favoriteCurrentPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? favoriteItems : favoriteBrowserItems
+        case .cinema, .settings:
+            return []
         }
     }
 
@@ -234,7 +229,13 @@ struct FileBrowserView: View {
             return canGoUp
         case .favorites:
             return !favoriteCurrentPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .cinema, .settings:
+            return false
         }
+    }
+
+    private var supportsFileOperations: Bool {
+        selectedTab == .files || selectedTab == .favorites
     }
 
     private var renameDialogBinding: Binding<Bool> {
@@ -243,6 +244,16 @@ struct FileBrowserView: View {
         } set: { isPresented in
             if !isPresented {
                 renameItem = nil
+            }
+        }
+    }
+
+    private var deleteDialogBinding: Binding<Bool> {
+        Binding {
+            deleteSelection != nil
+        } set: { isPresented in
+            if !isPresented {
+                deleteSelection = nil
             }
         }
     }
@@ -258,6 +269,8 @@ struct FileBrowserView: View {
             return currentPath.trimmingCharacters(in: .whitespacesAndNewlines)
         case .favorites:
             return favoriteCurrentPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .cinema, .settings:
+            return ""
         }
     }
 
@@ -285,6 +298,8 @@ struct FileBrowserView: View {
 private enum FileBrowserTab: Hashable {
     case files
     case favorites
+    case cinema
+    case settings
 }
 
 private struct FileOperationSelection: Identifiable {
@@ -437,46 +452,36 @@ private struct SelectionActionBar: View {
     }
 }
 
-private struct SideMenuView: View {
+private struct CinemaPlaceholderView: View {
+    var body: some View {
+        Color(.systemBackground)
+            .ignoresSafeArea()
+    }
+}
+
+private struct SettingsView: View {
     let serverURLString: String
     let account: String
     let logoutAction: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                Image(systemName: "externaldrive.connected.to.line.below.fill")
-                    .font(.largeTitle)
-                    .foregroundStyle(.blue)
-
-                Text(account.isEmpty ? "Synology View" : account)
-                    .font(.headline)
-
-                Text(serverURLString)
-                    .font(.caption)
+        List {
+            Section("账号") {
+                Label(account.isEmpty ? "Synology View" : account, systemImage: "person.crop.circle")
+                Label(serverURLString, systemImage: "server.rack")
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            .padding(20)
-
-            Divider()
-
-            Button(role: .destructive) {
-                logoutAction()
-            } label: {
-                Label("退出登录", systemImage: "rectangle.portrait.and.arrow.right")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 14)
             }
 
-            Spacer()
+            Section {
+                Button(role: .destructive) {
+                    logoutAction()
+                } label: {
+                    Label("退出登录", systemImage: "rectangle.portrait.and.arrow.right")
+                }
+            }
         }
-        .frame(width: 300)
-        .frame(maxHeight: .infinity)
-        .background(Color(.systemBackground))
-        .safeAreaPadding(.top)
-        .safeAreaPadding(.bottom)
+        .listStyle(.insetGrouped)
     }
 }
 

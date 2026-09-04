@@ -18,6 +18,7 @@ struct SynologyLoginResult: Equatable {
 struct SynologyFilePreviewItem: Identifiable, Equatable {
     let file: SynologyFileItem
     let url: URL
+    let resumeTime: TimeInterval
 
     var id: String { file.id }
 }
@@ -69,7 +70,12 @@ struct SynologyFileItem: Identifiable, Equatable {
     }
 
     private var fileExtension: String {
-        URL(fileURLWithPath: name).pathExtension.lowercased()
+        let nameExtension = URL(fileURLWithPath: name).pathExtension.lowercased()
+        if !nameExtension.isEmpty {
+            return nameExtension
+        }
+
+        return URL(fileURLWithPath: path).pathExtension.lowercased()
     }
 }
 
@@ -111,6 +117,46 @@ struct SynologyFileListResponse: Decodable {
 struct SynologyFileListData: Decodable {
     let shares: [SynologyFilePayload]?
     let files: [SynologyFilePayload]?
+}
+
+struct SynologyFavoriteListResponse: Decodable {
+    let success: Bool
+    let data: SynologyFavoriteListData?
+    let error: SynologyErrorPayload?
+}
+
+struct SynologyFavoriteListData: Decodable {
+    let favorites: [SynologyFavoritePayload]?
+}
+
+struct SynologyFavoritePayload: Decodable {
+    let name: String
+    let path: String
+    let isdir: Bool
+    let status: String?
+    let additional: SynologyFileAdditionalPayload?
+
+    var fileItem: SynologyFileItem {
+        SynologyFileItem(
+            id: "favorite:\(path)",
+            name: name,
+            path: path,
+            isDirectory: isdir,
+            size: additional?.size,
+            modifiedTime: additional?.time?.modifiedDate
+        )
+    }
+}
+
+struct SynologyFileOperationResponse: Decodable {
+    let success: Bool
+    let data: SynologyFileOperationData?
+    let error: SynologyErrorPayload?
+}
+
+struct SynologyFileOperationData: Decodable {
+    let taskid: String?
+    let finished: Bool?
 }
 
 struct SynologyFilePayload: Decodable {
@@ -177,6 +223,8 @@ enum SynologyClientError: LocalizedError, Equatable {
     case notAuthenticated
     case decodingFailed
     case unsupportedPreview
+    case invalidFileName
+    case invalidDestinationPath
 
     var errorDescription: String? {
         switch self {
@@ -194,6 +242,10 @@ enum SynologyClientError: LocalizedError, Equatable {
             return "无法解析群晖返回的数据"
         case .unsupportedPreview:
             return "当前文件暂不支持预览"
+        case .invalidFileName:
+            return "文件名无效，不能为空，也不能包含 /"
+        case .invalidDestinationPath:
+            return "目标文件夹路径无效"
         }
     }
 
@@ -235,6 +287,70 @@ enum SynologyClientError: LocalizedError, Equatable {
                 return "读取文件夹失败：当前 session 已失效，请重新登录（407）"
             default:
                 return "读取文件夹失败：SYNO.FileStation.List 返回错误 \(code)"
+            }
+        }
+
+        if apiName == "SYNO.FileStation.Favorite" {
+            switch code {
+            case 400:
+                return "读取收藏夹失败：参数无效（400）"
+            case 401:
+                return "读取收藏夹失败：账号没有 FileStation 权限（401）"
+            case 407:
+                return "读取收藏夹失败：当前 session 已失效，请重新登录（407）"
+            default:
+                return "读取收藏夹失败：SYNO.FileStation.Favorite 返回错误 \(code)"
+            }
+        }
+
+        if apiName == "SYNO.FileStation.Rename" {
+            switch code {
+            case 400:
+                return "重命名失败：参数无效（400）"
+            case 401:
+                return "重命名失败：没有 FileStation 权限（401）"
+            case 407:
+                return "重命名失败：当前 session 已失效，请重新登录（407）"
+            case 1200:
+                return "重命名失败：群晖无法完成该重命名（1200）"
+            default:
+                return "重命名失败：SYNO.FileStation.Rename 返回错误 \(code)"
+            }
+        }
+
+        if apiName == "SYNO.FileStation.CopyMove" {
+            switch code {
+            case 400:
+                return "移动失败：参数无效（400）"
+            case 401:
+                return "移动失败：没有 FileStation 权限（401）"
+            case 407:
+                return "移动失败：当前 session 已失效，请重新登录（407）"
+            case 1001:
+                return "移动失败：群晖无法移动该文件或文件夹（1001）"
+            case 1002:
+                return "移动失败：目标文件夹发生错误（1002）"
+            case 1003:
+                return "移动失败：目标位置已有同名项目，需要选择覆盖或跳过（1003）"
+            case 1004:
+                return "移动失败：文件和文件夹同名冲突（1004）"
+            default:
+                return "移动失败：SYNO.FileStation.CopyMove 返回错误 \(code)"
+            }
+        }
+
+        if apiName == "SYNO.FileStation.Delete" {
+            switch code {
+            case 400:
+                return "删除失败：参数无效（400）"
+            case 401:
+                return "删除失败：没有 FileStation 权限（401）"
+            case 407:
+                return "删除失败：当前 session 已失效，请重新登录（407）"
+            case 900:
+                return "删除失败：群晖无法删除这些文件或文件夹（900）"
+            default:
+                return "删除失败：SYNO.FileStation.Delete 返回错误 \(code)"
             }
         }
 
