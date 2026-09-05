@@ -9,17 +9,24 @@ struct FileBrowserView: View {
     let favoriteCurrentPath: String
     let favoriteBrowserItems: [SynologyFileItem]
     let isLoading: Bool
+    let uploadProgressItems: [UploadProgressItem]
     let canGoUp: Bool
-    let refreshAction: () -> Void
+    let canGoBack: Bool
+    let canGoFavoriteBack: Bool
+    let refreshAction: () async -> Void
     let loadFavoritesAction: () -> Void
-    let refreshFavoriteLocationAction: () -> Void
+    let refreshFavoriteLocationAction: () async -> Void
     let openFolderAction: (SynologyFileItem) -> Void
     let openFavoriteFolderAction: (SynologyFileItem) -> Void
-    let previewAction: (SynologyFileItem) -> Void
+    let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
+    let thumbnailURLAction: (SynologyFileItem) -> URL?
+    let uploadMediaAction: ([SynologyUploadFile], String) async -> Void
     let renameAction: (SynologyFileItem, String) -> Void
     let moveAction: ([SynologyFileItem], String) -> Void
     let deleteAction: ([SynologyFileItem]) -> Void
     let loadMoveDestinationFoldersAction: (String) async -> [SynologyFileItem]
+    let backAction: () -> Void
+    let favoriteBackAction: () -> Void
     let upAction: () -> Void
     let favoriteUpAction: () -> Void
     let logoutAction: () -> Void
@@ -32,6 +39,9 @@ struct FileBrowserView: View {
     @State private var renameText = ""
     @State private var moveSelection: FileOperationSelection?
     @State private var deleteSelection: FileOperationSelection?
+    @AppStorage("synology.fileDisplayMode") private var displayModeRawValue = FileDisplayMode.list.rawValue
+    @State private var fileTransitionEdge: Edge = .trailing
+    @State private var favoriteTransitionEdge: Edge = .trailing
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -42,7 +52,15 @@ struct FileBrowserView: View {
                     isLoading: isLoading,
                     isSelectionMode: isSelectionMode,
                     selectedItemIDs: $selectedItemIDs,
-                    openFolderAction: openFolderAction,
+                    displayMode: displayMode,
+                    transitionEdge: fileTransitionEdge,
+                    thumbnailURLAction: thumbnailURLAction,
+                    refreshAction: refreshAction,
+                    openFolderAction: { item in
+                        navigateFiles(edge: .trailing) {
+                            openFolderAction(item)
+                        }
+                    },
                     previewAction: previewAction,
                     renameRequestAction: prepareRename,
                     moveRequestAction: { moveSelection = FileOperationSelection(items: [$0]) },
@@ -60,7 +78,15 @@ struct FileBrowserView: View {
                     isLoading: isLoading,
                     isSelectionMode: isSelectionMode,
                     selectedItemIDs: $selectedItemIDs,
-                    openFolderAction: openFavoriteFolderAction,
+                    displayMode: displayMode,
+                    transitionEdge: favoriteTransitionEdge,
+                    thumbnailURLAction: thumbnailURLAction,
+                    refreshAction: refreshFavoriteLocationAction,
+                    openFolderAction: { item in
+                        navigateFavorites(edge: .trailing) {
+                            openFavoriteFolderAction(item)
+                        }
+                    },
                     previewAction: previewAction,
                     renameRequestAction: prepareRename,
                     moveRequestAction: { moveSelection = FileOperationSelection(items: [$0]) },
@@ -81,6 +107,7 @@ struct FileBrowserView: View {
                 SettingsView(
                     serverURLString: serverURLString,
                     account: account,
+                    uploadProgressItems: uploadProgressItems,
                     logoutAction: logoutAction
                 )
                 .tabItem {
@@ -97,26 +124,48 @@ struct FileBrowserView: View {
                         Button("取消") {
                             clearSelection()
                         }
+                    } else if canGoBackInSelectedTab {
+                        Button {
+                            performBack()
+                        } label: {
+                            Label("返回", systemImage: "chevron.left")
+                        }
+                        .disabled(isLoading)
                     }
                 }
 
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if !isSelectionMode {
+                        if supportsFileOperations {
+                            PhotoLibraryUploadButton(
+                                destinationPath: uploadDestinationPath,
+                                isDisabled: isLoading || uploadDestinationPath.isEmpty,
+                                uploadAction: uploadMediaAction
+                            )
+
+                            Menu {
+                                Picker("显示模式", selection: displayModeBinding) {
+                                    Label("列表", systemImage: "list.bullet").tag(FileDisplayMode.list)
+                                    Label("缩略图", systemImage: "square.grid.2x2").tag(FileDisplayMode.grid)
+                                }
+                            } label: {
+                                Label("显示模式", systemImage: displayMode.iconName)
+                            }
+                        }
+
                         if canShowUpButton {
                             Button {
-                                selectedTab == .favorites ? favoriteUpAction() : upAction()
+                                if selectedTab == .favorites {
+                                    navigateFavorites(edge: .leading, action: favoriteUpAction)
+                                } else {
+                                    navigateFiles(edge: .leading, action: upAction)
+                                }
                             } label: {
                                 Label("上一级", systemImage: "arrow.up.folder")
                             }
                             .disabled(isLoading || !canGoUpInSelectedTab)
                         }
 
-                        Button {
-                            selectedTab == .favorites ? refreshFavoriteLocationAction() : refreshAction()
-                        } label: {
-                            Label("刷新", systemImage: "arrow.clockwise")
-                        }
-                        .disabled(isLoading)
                     }
 
                     if supportsFileOperations {
@@ -138,6 +187,7 @@ struct FileBrowserView: View {
                             deleteSelection = FileOperationSelection(items: selectedItems)
                         }
                     )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
 
@@ -145,6 +195,7 @@ struct FileBrowserView: View {
         .onChange(of: selectedTab) {
             clearSelection()
         }
+        .simultaneousGesture(edgeBackGesture)
         .alert("重命名", isPresented: renameDialogBinding) {
             TextField("新文件名", text: $renameText)
                 .autocorrectionDisabled()
@@ -204,6 +255,18 @@ struct FileBrowserView: View {
         }
     }
 
+    private var displayMode: FileDisplayMode {
+        FileDisplayMode(rawValue: displayModeRawValue) ?? .list
+    }
+
+    private var displayModeBinding: Binding<FileDisplayMode> {
+        Binding {
+            displayMode
+        } set: { newValue in
+            displayModeRawValue = newValue.rawValue
+        }
+    }
+
     private var visibleItems: [SynologyFileItem] {
         switch selectedTab {
         case .files:
@@ -234,6 +297,17 @@ struct FileBrowserView: View {
         }
     }
 
+    private var canGoBackInSelectedTab: Bool {
+        switch selectedTab {
+        case .files:
+            return canGoBack
+        case .favorites:
+            return canGoFavoriteBack
+        case .cinema, .settings:
+            return false
+        }
+    }
+
     private var supportsFileOperations: Bool {
         selectedTab == .files || selectedTab == .favorites
     }
@@ -258,6 +332,17 @@ struct FileBrowserView: View {
         }
     }
 
+    private var uploadDestinationPath: String {
+        switch selectedTab {
+        case .files:
+            return currentPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .favorites:
+            return favoriteCurrentPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .cinema, .settings:
+            return ""
+        }
+    }
+
     private var initialMoveDestinationPath: String {
         let rememberedPath = lastMoveDestinationPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !rememberedPath.isEmpty {
@@ -275,18 +360,55 @@ struct FileBrowserView: View {
     }
 
     private func beginSelection() {
-        isSelectionMode = true
-        selectedItemIDs = []
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isSelectionMode = true
+            selectedItemIDs = []
+        }
     }
 
     private func clearSelection() {
-        isSelectionMode = false
-        selectedItemIDs = []
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isSelectionMode = false
+            selectedItemIDs = []
+        }
     }
 
     private func prepareRename(_ item: SynologyFileItem) {
         renameText = item.name
         renameItem = item
+    }
+
+    private var edgeBackGesture: some Gesture {
+        DragGesture(minimumDistance: 20)
+            .onEnded { value in
+                guard !isSelectionMode,
+                      canGoBackInSelectedTab,
+                      value.startLocation.x < 24,
+                      value.translation.width > 70,
+                      abs(value.translation.width) > abs(value.translation.height) else {
+                    return
+                }
+
+                performBack()
+            }
+    }
+
+    private func performBack() {
+        if selectedTab == .favorites {
+            navigateFavorites(edge: .leading, action: favoriteBackAction)
+        } else {
+            navigateFiles(edge: .leading, action: backAction)
+        }
+    }
+
+    private func navigateFiles(edge: Edge, action: () -> Void) {
+        fileTransitionEdge = edge
+        action()
+    }
+
+    private func navigateFavorites(edge: Edge, action: () -> Void) {
+        favoriteTransitionEdge = edge
+        action()
     }
 
     private func title(for path: String, rootTitle: String) -> String {
@@ -300,6 +422,20 @@ private enum FileBrowserTab: Hashable {
     case favorites
     case cinema
     case settings
+}
+
+private enum FileDisplayMode: String, Hashable {
+    case list
+    case grid
+
+    var iconName: String {
+        switch self {
+        case .list:
+            return "list.bullet"
+        case .grid:
+            return "square.grid.2x2"
+        }
+    }
 }
 
 private struct FileOperationSelection: Identifiable {
@@ -321,8 +457,12 @@ private struct FileListView: View {
     let isLoading: Bool
     let isSelectionMode: Bool
     @Binding var selectedItemIDs: Set<String>
+    let displayMode: FileDisplayMode
+    let transitionEdge: Edge
+    let thumbnailURLAction: (SynologyFileItem) -> URL?
+    let refreshAction: () async -> Void
     let openFolderAction: (SynologyFileItem) -> Void
-    let previewAction: (SynologyFileItem) -> Void
+    let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
     let renameRequestAction: (SynologyFileItem) -> Void
     let moveRequestAction: (SynologyFileItem) -> Void
     let deleteRequestAction: (SynologyFileItem) -> Void
@@ -331,10 +471,15 @@ private struct FileListView: View {
         BrowserListView(
             emptyTitle: "没有文件夹或文件",
             sectionTitle: currentPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "共享文件夹" : "文件夹清单",
+            contentID: currentPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "files-root" : currentPath,
+            transitionEdge: transitionEdge,
             items: items,
             isLoading: isLoading,
             isSelectionMode: isSelectionMode,
             selectedItemIDs: $selectedItemIDs,
+            displayMode: displayMode,
+            thumbnailURLAction: thumbnailURLAction,
+            refreshAction: refreshAction,
             openFolderAction: openFolderAction,
             previewAction: previewAction,
             renameRequestAction: renameRequestAction,
@@ -351,8 +496,12 @@ private struct FavoriteListView: View {
     let isLoading: Bool
     let isSelectionMode: Bool
     @Binding var selectedItemIDs: Set<String>
+    let displayMode: FileDisplayMode
+    let transitionEdge: Edge
+    let thumbnailURLAction: (SynologyFileItem) -> URL?
+    let refreshAction: () async -> Void
     let openFolderAction: (SynologyFileItem) -> Void
-    let previewAction: (SynologyFileItem) -> Void
+    let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
     let renameRequestAction: (SynologyFileItem) -> Void
     let moveRequestAction: (SynologyFileItem) -> Void
     let deleteRequestAction: (SynologyFileItem) -> Void
@@ -366,10 +515,15 @@ private struct FavoriteListView: View {
         BrowserListView(
             emptyTitle: isRoot ? "没有收藏夹" : "没有文件夹或文件",
             sectionTitle: isRoot ? "群晖收藏夹" : "文件夹清单",
+            contentID: isRoot ? "favorites-root" : currentPath,
+            transitionEdge: transitionEdge,
             items: isRoot ? rootItems : browserItems,
             isLoading: isLoading,
             isSelectionMode: isSelectionMode,
             selectedItemIDs: $selectedItemIDs,
+            displayMode: displayMode,
+            thumbnailURLAction: thumbnailURLAction,
+            refreshAction: refreshAction,
             openFolderAction: openFolderAction,
             previewAction: previewAction,
             renameRequestAction: renameRequestAction,
@@ -387,17 +541,43 @@ private struct FavoriteListView: View {
 private struct BrowserListView: View {
     let emptyTitle: String
     let sectionTitle: String
+    let contentID: String
+    let transitionEdge: Edge
     let items: [SynologyFileItem]
     let isLoading: Bool
     let isSelectionMode: Bool
     @Binding var selectedItemIDs: Set<String>
+    let displayMode: FileDisplayMode
+    let thumbnailURLAction: (SynologyFileItem) -> URL?
+    let refreshAction: () async -> Void
     let openFolderAction: (SynologyFileItem) -> Void
-    let previewAction: (SynologyFileItem) -> Void
+    let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
     let renameRequestAction: (SynologyFileItem) -> Void
     let moveRequestAction: (SynologyFileItem) -> Void
     let deleteRequestAction: (SynologyFileItem) -> Void
 
     var body: some View {
+        ZStack {
+            browserContent
+                .id(contentID)
+                .transition(.push(from: transitionEdge))
+        }
+        .clipped()
+        .animation(.smooth(duration: 0.32), value: contentID)
+        .animation(.easeInOut(duration: 0.18), value: isSelectionMode)
+    }
+
+    @ViewBuilder
+    private var browserContent: some View {
+        switch displayMode {
+        case .list:
+            listContent
+        case .grid:
+            gridContent
+        }
+    }
+
+    private var listContent: some View {
         List {
             if items.isEmpty {
                 EmptyFolderSection(title: emptyTitle, isLoading: isLoading)
@@ -416,6 +596,90 @@ private struct BrowserListView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .refreshable {
+            await refreshAction()
+        }
+    }
+
+    private var gridContent: some View {
+        ScrollView {
+            if items.isEmpty {
+                EmptyFolderSection(title: emptyTitle, isLoading: isLoading)
+                    .padding(.top, 24)
+            } else {
+                LazyVGrid(columns: gridColumns, spacing: 12) {
+                    ForEach(items) { item in
+                        FileThumbnailTile(
+                            item: item,
+                            thumbnailURL: thumbnailURLAction(item),
+                            isSelected: selectedItemIDs.contains(item.id),
+                            isSelectionMode: isSelectionMode,
+                            action: {
+                                activate(item)
+                            }
+                        )
+                        .contextMenu {
+                            fileOperationMenu(for: item)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 12)
+            }
+        }
+        .refreshable {
+            await refreshAction()
+        }
+        .background(Color(.systemGroupedBackground))
+    }
+
+    private var gridColumns: [GridItem] {
+        [
+            GridItem(.flexible(minimum: 0), spacing: 12),
+            GridItem(.flexible(minimum: 0), spacing: 12),
+            GridItem(.flexible(minimum: 0), spacing: 12)
+        ]
+    }
+
+    private func activate(_ item: SynologyFileItem) {
+        if isSelectionMode {
+            toggleSelection(for: item)
+        } else if item.isDirectory {
+            openFolderAction(item)
+        } else {
+            previewAction(item, items)
+        }
+    }
+
+    private func toggleSelection(for item: SynologyFileItem) {
+        withAnimation(.easeInOut(duration: 0.16)) {
+            if selectedItemIDs.contains(item.id) {
+                selectedItemIDs.remove(item.id)
+            } else {
+                selectedItemIDs.insert(item.id)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func fileOperationMenu(for item: SynologyFileItem) -> some View {
+        Button {
+            renameRequestAction(item)
+        } label: {
+            Label("重命名", systemImage: "pencil")
+        }
+
+        Button {
+            moveRequestAction(item)
+        } label: {
+            Label("移动到", systemImage: "folder.badge.arrow.right")
+        }
+
+        Button(role: .destructive) {
+            deleteRequestAction(item)
+        } label: {
+            Label("删除", systemImage: "trash")
+        }
     }
 }
 
@@ -462,6 +726,7 @@ private struct CinemaPlaceholderView: View {
 private struct SettingsView: View {
     let serverURLString: String
     let account: String
+    let uploadProgressItems: [UploadProgressItem]
     let logoutAction: () -> Void
 
     var body: some View {
@@ -473,6 +738,20 @@ private struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("任务") {
+                NavigationLink {
+                    UploadProgressListView(items: uploadProgressItems)
+                } label: {
+                    HStack {
+                        Label("上传进度", systemImage: "arrow.up.circle")
+                        Spacer()
+                        Text(uploadProgressSummary)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             Section {
                 Button(role: .destructive) {
                     logoutAction()
@@ -482,6 +761,104 @@ private struct SettingsView: View {
             }
         }
         .listStyle(.insetGrouped)
+    }
+
+    private var uploadProgressSummary: String {
+        let activeCount = uploadProgressItems.filter { $0.status == .queued || $0.status == .uploading }.count
+        if activeCount > 0 {
+            return "\(activeCount) 个进行中"
+        }
+
+        return uploadProgressItems.isEmpty ? "无任务" : "\(uploadProgressItems.count) 个任务"
+    }
+}
+
+private struct UploadProgressListView: View {
+    let items: [UploadProgressItem]
+
+    var body: some View {
+        List {
+            if items.isEmpty {
+                ContentUnavailableView("没有上传任务", systemImage: "arrow.up.circle")
+            } else {
+                ForEach(items) { item in
+                    UploadProgressRow(item: item)
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("上传进度")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct UploadProgressRow: View {
+    let item: UploadProgressItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: iconName)
+                    .foregroundStyle(iconColor)
+                    .frame(width: 22)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.fileName)
+                        .font(.headline)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Text(item.destinationPath)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer()
+
+                Text(item.progressText)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(iconColor)
+            }
+
+            if item.status == .uploading || item.status == .queued {
+                ProgressView(value: item.progress)
+            }
+
+            if let errorMessage = item.errorMessage, item.status == .failed {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var iconName: String {
+        switch item.status {
+        case .queued:
+            return "clock"
+        case .uploading:
+            return "arrow.up.circle"
+        case .finished:
+            return "checkmark.circle.fill"
+        case .failed:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var iconColor: Color {
+        switch item.status {
+        case .queued:
+            return .secondary
+        case .uploading:
+            return .blue
+        case .finished:
+            return .green
+        case .failed:
+            return .red
+        }
     }
 }
 
@@ -654,7 +1031,7 @@ private struct FileListSection: View {
     let isSelectionMode: Bool
     @Binding var selectedItemIDs: Set<String>
     let openFolderAction: (SynologyFileItem) -> Void
-    let previewAction: (SynologyFileItem) -> Void
+    let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
     let renameRequestAction: (SynologyFileItem) -> Void
     let moveRequestAction: (SynologyFileItem) -> Void
     let deleteRequestAction: (SynologyFileItem) -> Void
@@ -668,7 +1045,7 @@ private struct FileListSection: View {
                     } else if item.isDirectory {
                         openFolderAction(item)
                     } else {
-                        previewAction(item)
+                        previewAction(item, items)
                     }
                 } label: {
                     FileRow(
@@ -729,11 +1106,135 @@ private struct FileListSection: View {
     }
 
     private func toggleSelection(for item: SynologyFileItem) {
-        if selectedItemIDs.contains(item.id) {
-            selectedItemIDs.remove(item.id)
-        } else {
-            selectedItemIDs.insert(item.id)
+        withAnimation(.easeInOut(duration: 0.16)) {
+            if selectedItemIDs.contains(item.id) {
+                selectedItemIDs.remove(item.id)
+            } else {
+                selectedItemIDs.insert(item.id)
+            }
         }
+    }
+}
+
+private struct FileThumbnailTile: View {
+    let item: SynologyFileItem
+    let thumbnailURL: URL?
+    let isSelected: Bool
+    let isSelectionMode: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 8) {
+                GeometryReader { proxy in
+                    ZStack(alignment: .topTrailing) {
+                        thumbnailContent
+                            .frame(width: proxy.size.width, height: proxy.size.width)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                        if isSelectionMode {
+                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                .font(.title3)
+                                .foregroundStyle(isSelected ? .blue : .white)
+                                .shadow(radius: 2)
+                                .padding(8)
+                        } else if item.isVideo {
+                            Image(systemName: "play.circle.fill")
+                                .font(.title2)
+                                .foregroundStyle(.white)
+                                .shadow(radius: 3)
+                                .padding(8)
+                        }
+                    }
+                }
+                .aspectRatio(1, contentMode: .fit)
+
+                Text(item.name)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 150, alignment: .top)
+            .padding(8)
+            .background(Color(.secondarySystemGroupedBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isSelected ? Color.blue : Color.clear, lineWidth: 2)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var thumbnailContent: some View {
+        if let thumbnailURL, item.isPreviewable {
+            AsyncImage(url: thumbnailURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
+                switch phase {
+                case let .success(image):
+                    image
+                        .resizable()
+                        .scaledToFill()
+                case .empty:
+                    thumbnailPlaceholder
+                        .overlay {
+                            ProgressView()
+                        }
+                case .failure:
+                    thumbnailPlaceholder
+                @unknown default:
+                    thumbnailPlaceholder
+                }
+            }
+        } else {
+            thumbnailPlaceholder
+        }
+    }
+
+    private var thumbnailPlaceholder: some View {
+        ZStack {
+            Color(.tertiarySystemGroupedBackground)
+            Image(systemName: iconName)
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundStyle(iconColor)
+        }
+    }
+
+    private var iconName: String {
+        if item.isDirectory {
+            return "folder.fill"
+        }
+
+        if item.isVideo {
+            return "play.rectangle.fill"
+        }
+
+        if item.isImage {
+            return "photo.fill"
+        }
+
+        return "doc.fill"
+    }
+
+    private var iconColor: Color {
+        if item.isDirectory {
+            return .blue
+        }
+
+        if item.isVideo {
+            return .orange
+        }
+
+        if item.isImage {
+            return .green
+        }
+
+        return .secondary
     }
 }
 

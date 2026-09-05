@@ -18,9 +18,54 @@ struct SynologyLoginResult: Equatable {
 struct SynologyFilePreviewItem: Identifiable, Equatable {
     let file: SynologyFileItem
     let url: URL
+    let playbackURLs: [URL]
     let resumeTime: TimeInterval
+    let knownDuration: TimeInterval
+    let imageGallery: [SynologyImagePreviewItem]
 
     var id: String { file.id }
+}
+
+struct SynologyImagePreviewItem: Identifiable, Equatable {
+    let file: SynologyFileItem
+    let url: URL
+
+    var id: String { file.path }
+}
+
+struct SynologyUploadFile: Equatable {
+    let fileURL: URL
+    let fileName: String
+    let creationDate: Date?
+}
+
+struct UploadProgressItem: Identifiable, Equatable {
+    let id: UUID
+    let fileName: String
+    let destinationPath: String
+    var progress: Double
+    var status: UploadProgressStatus
+    var errorMessage: String?
+
+    var progressText: String {
+        switch status {
+        case .queued:
+            return "等待中"
+        case .uploading:
+            return "\(Int(progress * 100))%"
+        case .finished:
+            return "已完成"
+        case .failed:
+            return "失败"
+        }
+    }
+}
+
+enum UploadProgressStatus: Equatable {
+    case queued
+    case uploading
+    case finished
+    case failed
 }
 
 struct SynologyFileItem: Identifiable, Equatable {
@@ -151,6 +196,11 @@ struct SynologyFavoritePayload: Decodable {
 struct SynologyFileOperationResponse: Decodable {
     let success: Bool
     let data: SynologyFileOperationData?
+    let error: SynologyErrorPayload?
+}
+
+struct SynologyUploadResponse: Decodable {
+    let success: Bool
     let error: SynologyErrorPayload?
 }
 

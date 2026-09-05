@@ -3,6 +3,7 @@
 xcuserdata/
 DerivedData/
 build/
+Pods/
 *.moved-aside
 *.hmap
 *.ipa

@@ -24,15 +24,18 @@ struct ContentView: View {
                     favoriteCurrentPath: model.favoriteCurrentPath,
                     favoriteBrowserItems: model.favoriteBrowserItems,
                     isLoading: model.isLoading,
+                    uploadProgressItems: model.uploadProgressItems,
                     canGoUp: model.canGoUp,
+                    canGoBack: model.canGoBack,
+                    canGoFavoriteBack: model.canGoFavoriteBack,
                     refreshAction: {
-                        Task { await model.loadCurrentLocation() }
+                        await model.loadCurrentLocation()
                     },
                     loadFavoritesAction: {
                         Task { await model.loadFavorites() }
                     },
                     refreshFavoriteLocationAction: {
-                        Task { await model.loadFavoriteCurrentLocation() }
+                        await model.loadFavoriteCurrentLocation()
                     },
                     openFolderAction: { item in
                         Task { await model.openFolder(item) }
@@ -40,8 +43,14 @@ struct ContentView: View {
                     openFavoriteFolderAction: { item in
                         Task { await model.openFavoriteFolder(item) }
                     },
-                    previewAction: { item in
-                        model.preview(item)
+                    previewAction: { item, contextItems in
+                        model.preview(item, in: contextItems)
+                    },
+                    thumbnailURLAction: { item in
+                        model.thumbnailURL(for: item)
+                    },
+                    uploadMediaAction: { files, destinationPath in
+                        await model.upload(files, to: destinationPath)
                     },
                     renameAction: { item, newName in
                         Task { await model.rename(item, to: newName) }
@@ -55,6 +64,12 @@ struct ContentView: View {
                     loadMoveDestinationFoldersAction: { path in
                         await model.loadMoveDestinationFolders(at: path)
                     },
+                    backAction: {
+                        Task { await model.goBack() }
+                    },
+                    favoriteBackAction: {
+                        Task { await model.goFavoriteBack() }
+                    },
                     upAction: {
                         Task { await model.openParentFolder() }
                     },
@@ -66,6 +81,7 @@ struct ContentView: View {
                     },
                     lastMoveDestinationPath: model.lastMoveDestinationPath
                 )
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
             } else {
                 LoginView(
                     serverURLString: $model.serverURLString,
@@ -76,6 +92,7 @@ struct ContentView: View {
                     otpCode: $model.pendingOTPCode,
                     trustsThisDevice: $model.trustsThisDevice,
                     isLoading: model.isLoading,
+                    statusMessage: model.statusMessage,
                     selectServerAction: { server in
                         model.selectServer(server)
                     },
@@ -86,6 +103,7 @@ struct ContentView: View {
                         Task { await model.loginWithOTP() }
                     }
                 )
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
             }
         }
         .fullScreenCover(item: $model.previewItem) { item in
@@ -93,8 +111,15 @@ struct ContentView: View {
                 item: item,
                 savePlaybackProgress: { progress in
                     model.savePlaybackProgress(progress, for: item)
+                },
+                savePlaybackDuration: { duration in
+                    model.savePlaybackDuration(duration, for: item)
                 }
             )
+        }
+        .animation(.easeInOut(duration: 0.22), value: model.isConnected)
+        .task {
+            await model.autoLoginIfPossible()
         }
     }
 }

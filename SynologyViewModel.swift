@@ -22,15 +22,22 @@ final class SynologyViewModel {
     var favoriteBrowserItems: [SynologyFileItem] = []
     var lastMoveDestinationPath = ""
     var previewItem: SynologyFilePreviewItem?
+    var uploadProgressItems: [UploadProgressItem] = []
 
     private(set) var authAPI: SynologyAPIInfo?
     private(set) var fileStationListAPI: SynologyAPIInfo?
     private(set) var fileStationDownloadAPI: SynologyAPIInfo?
     private(set) var fileStationFavoriteAPI: SynologyAPIInfo?
+    private(set) var fileStationThumbAPI: SynologyAPIInfo?
+    private(set) var fileStationUploadAPI: SynologyAPIInfo?
     private(set) var fileStationRenameAPI: SynologyAPIInfo?
     private(set) var fileStationCopyMoveAPI: SynologyAPIInfo?
     private(set) var fileStationDeleteAPI: SynologyAPIInfo?
     private var sessionID: String?
+    private var pathHistory: [String] = []
+    private var favoritePathHistory: [String] = []
+    private var previewImageItems: [SynologyFileItem] = []
+    private var didAttemptAutoLogin = false
     private let settingsStore = SynologyLoginSettingsStore()
     private let fileOperationSettingsStore = FileOperationSettingsStore()
     private let playbackProgressStore = PlaybackProgressStore()
@@ -52,12 +59,36 @@ final class SynologyViewModel {
         !currentPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    var canGoBack: Bool {
+        !pathHistory.isEmpty
+    }
+
+    var canGoFavoriteBack: Bool {
+        !favoritePathHistory.isEmpty
+    }
+
     func login() async {
         await authenticateAndLoad(otpCode: nil)
     }
 
     func loginWithOTP() async {
         await authenticateAndLoad(otpCode: pendingOTPCode)
+    }
+
+    func autoLoginIfPossible() async {
+        guard !didAttemptAutoLogin, !isConnected else {
+            return
+        }
+
+        didAttemptAutoLogin = true
+        let trimmedServer = serverURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAccount = account.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedServer.isEmpty, !trimmedAccount.isEmpty, !password.isEmpty else {
+            return
+        }
+
+        statusMessage = "正在自动登录"
+        await authenticateAndLoad(otpCode: nil)
     }
 
     func selectServer(_ server: String) {
@@ -76,7 +107,10 @@ final class SynologyViewModel {
         favoriteItems = []
         favoriteCurrentPath = ""
         favoriteBrowserItems = []
+        pathHistory = []
+        favoritePathHistory = []
         previewItem = nil
+        previewImageItems = []
         statusMessage = "已退出登录"
     }
 
@@ -154,8 +188,7 @@ final class SynologyViewModel {
             return
         }
 
-        currentPath = item.path
-        await loadCurrentLocation()
+        await navigateFiles(to: item.path, recordsHistory: true)
     }
 
     func openFavoriteFolder(_ item: SynologyFileItem) async {
@@ -163,8 +196,7 @@ final class SynologyViewModel {
             return
         }
 
-        favoriteCurrentPath = item.path
-        await loadFavoriteCurrentLocation()
+        await navigateFavorites(to: item.path, recordsHistory: true)
     }
 
     func openParentFolder() async {
@@ -173,8 +205,7 @@ final class SynologyViewModel {
             return
         }
 
-        currentPath = parentPath(for: path)
-        await loadCurrentLocation()
+        await navigateFiles(to: parentPath(for: path), recordsHistory: true, historyPath: path)
     }
 
     func openFavoriteParentFolder() async {
@@ -183,8 +214,131 @@ final class SynologyViewModel {
             return
         }
 
-        favoriteCurrentPath = parentPath(for: path)
-        await loadFavoriteCurrentLocation()
+        await navigateFavorites(to: parentPath(for: path), recordsHistory: true, historyPath: path)
+    }
+
+    func goBack() async {
+        guard let previousPath = pathHistory.last else {
+            return
+        }
+
+        await navigateFiles(to: previousPath, recordsHistory: false)
+    }
+
+    func goFavoriteBack() async {
+        guard let previousPath = favoritePathHistory.last else {
+            return
+        }
+
+        await navigateFavorites(to: previousPath, recordsHistory: false)
+    }
+
+    private func navigateFiles(to path: String, recordsHistory: Bool, historyPath: String? = nil) async {
+        await runNetworkOperation {
+            let normalizedTargetPath = normalizedPath(path)
+            let (client, listAPI) = try await fileListContext()
+            let targetItems = try await loadFileItems(at: normalizedTargetPath, using: client, listAPI: listAPI)
+
+            if recordsHistory {
+                pathHistory.append(historyPath ?? normalizedPath(currentPath))
+            } else {
+                pathHistory.removeLast()
+            }
+
+            currentPath = normalizedTargetPath
+            fileItems = targetItems
+            statusMessage = normalizedTargetPath.isEmpty ? "读取到 \(targetItems.count) 个共享文件夹" : "读取到 \(targetItems.count) 个项目"
+        }
+    }
+
+    private func navigateFavorites(to path: String, recordsHistory: Bool, historyPath: String? = nil) async {
+        await runNetworkOperation {
+            let normalizedTargetPath = normalizedPath(path)
+            let (client, listAPI) = try await fileListContext()
+            let targetItems: [SynologyFileItem]
+
+            if normalizedTargetPath.isEmpty {
+                guard let fileStationFavoriteAPI else {
+                    throw SynologyClientError.missingAPI("SYNO.FileStation.Favorite")
+                }
+                targetItems = try await client.loadFavorites(api: fileStationFavoriteAPI)
+            } else {
+                targetItems = try await client.loadFolder(api: listAPI, path: normalizedTargetPath)
+            }
+
+            if recordsHistory {
+                favoritePathHistory.append(historyPath ?? normalizedPath(favoriteCurrentPath))
+            } else {
+                favoritePathHistory.removeLast()
+            }
+
+            favoriteCurrentPath = normalizedTargetPath
+            if normalizedTargetPath.isEmpty {
+                favoriteItems = targetItems
+                favoriteBrowserItems = []
+                statusMessage = "读取到 \(targetItems.count) 个收藏夹"
+            } else {
+                favoriteBrowserItems = targetItems
+                statusMessage = "读取到 \(targetItems.count) 个收藏夹项目"
+            }
+        }
+    }
+
+    func preview(_ item: SynologyFileItem, in contextItems: [SynologyFileItem]) {
+        do {
+            guard item.isPreviewable else {
+                throw SynologyClientError.unsupportedPreview
+            }
+
+            let imageItems = item.isImage ? contextItems.filter(\.isImage) : []
+            previewImageItems = imageItems
+            previewItem = try previewItem(for: item, imageItems: imageItems)
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func showPreviousImage() {
+        showAdjacentImage(offset: -1)
+    }
+
+    func showNextImage() {
+        showAdjacentImage(offset: 1)
+    }
+
+    private func showAdjacentImage(offset: Int) {
+        // Image swiping is handled inside ImagePreview now. Keep this for older call sites.
+    }
+
+    private func previewItem(for item: SynologyFileItem, imageItems: [SynologyFileItem] = []) throws -> SynologyFilePreviewItem {
+        guard item.isPreviewable else {
+            throw SynologyClientError.unsupportedPreview
+        }
+
+        guard let sessionID else {
+            throw SynologyClientError.notAuthenticated
+        }
+
+        let client = try SynologyClient(serverURLString: serverURLString, sessionID: sessionID)
+        let playbackURLs = try client.downloadURLVariants(api: fileStationDownloadAPI, for: item.path)
+        guard let url = playbackURLs.first else {
+            throw SynologyClientError.invalidURL
+        }
+        let imageGallery = try imageItems.map { imageItem in
+            SynologyImagePreviewItem(
+                file: imageItem,
+                url: try client.downloadURL(api: fileStationDownloadAPI, for: imageItem.path)
+            )
+        }
+
+        return SynologyFilePreviewItem(
+            file: item,
+            url: url,
+            playbackURLs: item.isVideo ? playbackURLs : [url],
+            resumeTime: playbackProgressStore.progress(for: item.path),
+            knownDuration: playbackProgressStore.duration(for: item.path),
+            imageGallery: imageGallery
+        )
     }
 
     func preview(_ item: SynologyFileItem) {
@@ -193,17 +347,9 @@ final class SynologyViewModel {
                 throw SynologyClientError.unsupportedPreview
             }
 
-            guard let sessionID else {
-                throw SynologyClientError.notAuthenticated
-            }
-
-            let client = try SynologyClient(serverURLString: serverURLString, sessionID: sessionID)
-            let url = try client.downloadURL(api: fileStationDownloadAPI, for: item.path)
-            previewItem = SynologyFilePreviewItem(
-                file: item,
-                url: url,
-                resumeTime: playbackProgressStore.progress(for: item.path)
-            )
+            let imageItems = item.isImage ? [item] : []
+            previewImageItems = imageItems
+            previewItem = try previewItem(for: item, imageItems: imageItems)
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -211,6 +357,20 @@ final class SynologyViewModel {
 
     func savePlaybackProgress(_ progress: TimeInterval, for item: SynologyFilePreviewItem) {
         playbackProgressStore.save(progress, for: item.file.path)
+    }
+
+    func savePlaybackDuration(_ duration: TimeInterval, for item: SynologyFilePreviewItem) {
+        playbackProgressStore.saveDuration(duration, for: item.file.path)
+    }
+
+    func thumbnailURL(for item: SynologyFileItem) -> URL? {
+        guard item.isPreviewable,
+              sessionID != nil,
+              let client = try? SynologyClient(serverURLString: serverURLString, sessionID: sessionID) else {
+            return nil
+        }
+
+        return try? client.thumbnailURL(api: fileStationThumbAPI, for: item.path)
     }
 
     func rename(_ item: SynologyFileItem, to newName: String) async {
@@ -272,6 +432,83 @@ final class SynologyViewModel {
         }
     }
 
+    func upload(_ files: [SynologyUploadFile], to destinationPath: String) async {
+        let destination = normalizedPath(destinationPath)
+        guard !destination.isEmpty else {
+            statusMessage = SynologyClientError.invalidDestinationPath.localizedDescription
+            cleanupUploadFiles(files)
+            return
+        }
+        guard !files.isEmpty else {
+            return
+        }
+
+        let newItems = files.map { file in
+            UploadProgressItem(
+                id: UUID(),
+                fileName: file.fileName,
+                destinationPath: destination,
+                progress: 0,
+                status: .queued,
+                errorMessage: nil
+            )
+        }
+        uploadProgressItems.append(contentsOf: newItems)
+        statusMessage = "已加入上传队列：\(files.count) 个项目"
+
+        Task {
+            await uploadFilesInBackground(files, progressItems: newItems, destination: destination)
+        }
+    }
+
+    private func uploadFilesInBackground(
+        _ files: [SynologyUploadFile],
+        progressItems: [UploadProgressItem],
+        destination: String
+    ) async {
+        defer { cleanupUploadFiles(files) }
+
+        do {
+            guard let sessionID else {
+                throw SynologyClientError.notAuthenticated
+            }
+
+            let client = try SynologyClient(serverURLString: serverURLString, sessionID: sessionID)
+            let apis = discoveredAPIs.isEmpty ? try await client.discoverAPIs() : discoveredAPIs
+            applyDiscoveredAPIs(apis)
+
+            guard let fileStationUploadAPI else {
+                throw SynologyClientError.missingAPI("SYNO.FileStation.Upload")
+            }
+
+            for (file, item) in zip(files, progressItems) {
+                let itemID = item.id
+                updateUploadItem(itemID, status: .uploading, progress: 0.01)
+                do {
+                    try await client.upload(api: fileStationUploadAPI, file: file, to: destination) { [weak self, itemID] progress in
+                        Task { @MainActor in
+                            self?.updateUploadItem(itemID, status: .uploading, progress: progress)
+                        }
+                    }
+                    updateUploadItem(itemID, status: .finished, progress: 1)
+                } catch {
+                    updateUploadItem(itemID, status: .failed, errorMessage: error.localizedDescription)
+                }
+            }
+
+            try await reloadAfterFileOperation(using: client)
+            statusMessage = "上传任务已完成"
+        } catch {
+            for item in progressItems where uploadStatus(for: item.id) != .finished {
+                updateUploadItem(item.id, status: .failed, errorMessage: error.localizedDescription)
+            }
+            statusMessage = error.localizedDescription
+            if shouldReturnToLogin(for: error) {
+                logout(message: "连接已失效，请重新登录")
+            }
+        }
+    }
+
     func delete(_ items: [SynologyFileItem]) async {
         await runNetworkOperation {
             guard !items.isEmpty else {
@@ -293,6 +530,33 @@ final class SynologyViewModel {
             try await client.delete(api: fileStationDeleteAPI, items: items)
             try await reloadAfterFileOperation(using: client)
             statusMessage = "已删除 \(items.count) 个项目"
+        }
+    }
+
+    private func uploadStatus(for id: UUID) -> UploadProgressStatus? {
+        uploadProgressItems.first(where: { $0.id == id })?.status
+    }
+
+    private func updateUploadItem(
+        _ id: UUID,
+        status: UploadProgressStatus,
+        progress: Double? = nil,
+        errorMessage: String? = nil
+    ) {
+        guard let index = uploadProgressItems.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+
+        uploadProgressItems[index].status = status
+        if let progress {
+            uploadProgressItems[index].progress = min(max(progress, 0), 1)
+        }
+        uploadProgressItems[index].errorMessage = errorMessage
+    }
+
+    private func cleanupUploadFiles(_ files: [SynologyUploadFile]) {
+        for file in files {
+            try? FileManager.default.removeItem(at: file.fileURL.deletingLastPathComponent())
         }
     }
 
@@ -327,6 +591,7 @@ final class SynologyViewModel {
 
     private func authenticateAndLoad(otpCode: String?) async {
         isLoading = true
+        statusMessage = otpCode == nil ? "正在连接服务器" : "正在验证两步验证码"
         defer { isLoading = false }
 
         do {
@@ -369,6 +634,8 @@ final class SynologyViewModel {
         favoriteItems = []
         favoriteCurrentPath = ""
         favoriteBrowserItems = []
+        pathHistory = []
+        favoritePathHistory = []
 
         let authenticatedClient = try SynologyClient(serverURLString: normalizedServerURLString, sessionID: loginResult.sid)
         fileItems = try await authenticatedClient.loadSharedFolders(api: fileStationListAPI)
@@ -392,6 +659,8 @@ final class SynologyViewModel {
         fileStationListAPI = apis.first { $0.name == "SYNO.FileStation.List" }
         fileStationDownloadAPI = apis.first { $0.name == "SYNO.FileStation.Download" }
         fileStationFavoriteAPI = apis.first { $0.name == "SYNO.FileStation.Favorite" }
+        fileStationThumbAPI = apis.first { $0.name == "SYNO.FileStation.Thumb" }
+        fileStationUploadAPI = apis.first { $0.name == "SYNO.FileStation.Upload" }
         fileStationRenameAPI = apis.first { $0.name == "SYNO.FileStation.Rename" }
         fileStationCopyMoveAPI = apis.first { $0.name == "SYNO.FileStation.CopyMove" }
         fileStationDeleteAPI = apis.first { $0.name == "SYNO.FileStation.Delete" }
@@ -447,6 +716,31 @@ final class SynologyViewModel {
         return parent == "/" ? "" : parent
     }
 
+    private func fileListContext() async throws -> (SynologyClient, SynologyAPIInfo) {
+        guard let sessionID else {
+            throw SynologyClientError.notAuthenticated
+        }
+
+        let client = try SynologyClient(serverURLString: serverURLString, sessionID: sessionID)
+        let apis = discoveredAPIs.isEmpty ? try await client.discoverAPIs() : discoveredAPIs
+        applyDiscoveredAPIs(apis)
+
+        guard let fileStationListAPI else {
+            throw SynologyClientError.missingAPI("SYNO.FileStation.List")
+        }
+
+        return (client, fileStationListAPI)
+    }
+
+    private func loadFileItems(at path: String, using client: SynologyClient, listAPI: SynologyAPIInfo) async throws -> [SynologyFileItem] {
+        let normalizedTargetPath = normalizedPath(path)
+        if normalizedTargetPath.isEmpty {
+            return try await client.loadSharedFolders(api: listAPI)
+        }
+
+        return try await client.loadFolder(api: listAPI, path: normalizedTargetPath)
+    }
+
     private func reloadAfterFileOperation(using client: SynologyClient) async throws {
         guard let fileStationListAPI else {
             throw SynologyClientError.missingAPI("SYNO.FileStation.List")
@@ -481,8 +775,54 @@ final class SynologyViewModel {
 
         do {
             try await operation()
+        } catch is CancellationError {
+            return
         } catch {
+            if isRequestCancellation(error) {
+                return
+            }
+
             statusMessage = error.localizedDescription
+            if shouldReturnToLogin(for: error) {
+                logout(message: "连接已失效，请重新登录")
+            }
         }
+    }
+
+    private func logout(message: String) {
+        sessionID = nil
+        currentPath = ""
+        fileItems = []
+        favoriteItems = []
+        favoriteCurrentPath = ""
+        favoriteBrowserItems = []
+        pathHistory = []
+        favoritePathHistory = []
+        previewItem = nil
+        previewImageItems = []
+        statusMessage = message
+    }
+
+    private func isRequestCancellation(_ error: Error) -> Bool {
+        if let urlError = error as? URLError {
+            return urlError.code == .cancelled
+        }
+
+        return false
+    }
+
+    private func shouldReturnToLogin(for error: Error) -> Bool {
+        if let clientError = error as? SynologyClientError {
+            switch clientError {
+            case .httpError, .notAuthenticated:
+                return true
+            case let .apiError(code, _):
+                return code == 105 || code == 106 || code == 107 || code == 119 || code == 407
+            default:
+                return false
+            }
+        }
+
+        return error is URLError
     }
 }

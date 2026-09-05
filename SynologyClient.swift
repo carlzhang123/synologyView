@@ -212,14 +212,121 @@ struct SynologyClient {
         try await waitForOperationCompletion(api: api, taskID: taskID)
     }
 
-    func downloadURL(api: SynologyAPIInfo?, for path: String) throws -> URL {
+    func upload(
+        api: SynologyAPIInfo,
+        file: SynologyUploadFile,
+        to destinationPath: String,
+        progressHandler: @escaping (Double) -> Void
+    ) async throws {
+        guard sessionID != nil else {
+            throw SynologyClientError.notAuthenticated
+        }
+
+        let url = try makeAPIURL(
+            api: api,
+            method: "upload",
+            version: min(api.maxVersion, 2),
+            parameters: [],
+            includeSession: true
+        )
+        let boundary = "Boundary-\(UUID().uuidString)"
+        let multipartURL = try makeMultipartUploadFile(
+            sourceFile: file,
+            destinationPath: destinationPath,
+            boundary: boundary
+        )
+        defer { try? FileManager.default.removeItem(at: multipartURL) }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 120
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        let (data, response) = try await UploadProgressDelegate.upload(
+            request: request,
+            fileURL: multipartURL,
+            progressHandler: progressHandler
+        )
+        guard let httpResponse = response as? HTTPURLResponse,
+              200..<300 ~= httpResponse.statusCode else {
+            throw SynologyClientError.httpError((response as? HTTPURLResponse)?.statusCode)
+        }
+
+        let uploadResponse = try JSONDecoder().decode(SynologyUploadResponse.self, from: data)
+        guard uploadResponse.success else {
+            throw SynologyClientError.apiError(uploadResponse.error?.code, apiName: api.name)
+        }
+        progressHandler(1)
+    }
+
+    func thumbnailURL(api: SynologyAPIInfo?, for path: String, size: String = "small") throws -> URL {
         guard sessionID != nil else {
             throw SynologyClientError.notAuthenticated
         }
 
         let parameters = [
-            URLQueryItem(name: "path", value: "[\"\(path)\"]"),
-            URLQueryItem(name: "mode", value: "open")
+            URLQueryItem(name: "path", value: path),
+            URLQueryItem(name: "size", value: size)
+        ]
+
+        if let api {
+            return try makeAPIURL(
+                api: api,
+                method: "get",
+                version: api.maxVersion,
+                parameters: parameters,
+                includeSession: true
+            )
+        }
+
+        var queryItems = [
+            URLQueryItem(name: "api", value: "SYNO.FileStation.Thumb"),
+            URLQueryItem(name: "version", value: "2"),
+            URLQueryItem(name: "method", value: "get")
+        ]
+        queryItems.append(contentsOf: parameters)
+
+        if let sessionID {
+            queryItems.append(URLQueryItem(name: "_sid", value: sessionID))
+        }
+
+        return try makeURL(path: "entry.cgi", queryItems: queryItems)
+    }
+
+    func downloadURL(api: SynologyAPIInfo?, for path: String) throws -> URL {
+        try downloadURLVariants(api: api, for: path).first ?? makeDownloadURL(api: api, pathValue: path, mode: "open")
+    }
+
+    func downloadURLVariants(api: SynologyAPIInfo?, for path: String) throws -> [URL] {
+        guard sessionID != nil else {
+            throw SynologyClientError.notAuthenticated
+        }
+
+        let pathValues = [
+            path,
+            try jsonEncodedString(path),
+            try jsonEncodedString([path])
+        ]
+        let modes = ["open", "download"]
+
+        var urls: [URL] = []
+        for mode in modes {
+            for pathValue in pathValues {
+                for candidateAPI in [api, nil] {
+                    let url = try makeDownloadURL(api: candidateAPI, pathValue: pathValue, mode: mode)
+                    if !urls.contains(url) {
+                        urls.append(url)
+                    }
+                }
+            }
+        }
+        return urls
+    }
+
+    private func makeDownloadURL(api: SynologyAPIInfo?, pathValue: String, mode: String) throws -> URL {
+        let parameters = [
+            URLQueryItem(name: "path", value: pathValue),
+            URLQueryItem(name: "mode", value: mode)
         ]
 
         if let api {
@@ -268,6 +375,44 @@ struct SynologyClient {
             }
 
             try await Task.sleep(for: .milliseconds(500))
+        }
+    }
+
+    private func makeMultipartUploadFile(sourceFile: SynologyUploadFile, destinationPath: String, boundary: String) throws -> URL {
+        let multipartURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SynologyViewMultipart-\(UUID().uuidString).body")
+        FileManager.default.createFile(atPath: multipartURL.path, contents: nil)
+
+        let handle = try FileHandle(forWritingTo: multipartURL)
+        defer { try? handle.close() }
+
+        try appendFormField(name: "path", value: destinationPath, boundary: boundary, to: handle)
+        try appendFormField(name: "create_parents", value: "false", boundary: boundary, to: handle)
+        try appendFormField(name: "overwrite", value: "true", boundary: boundary, to: handle)
+        try appendFileField(sourceFile, boundary: boundary, to: handle)
+        try handle.write(contentsOf: Data("\r\n--\(boundary)--\r\n".utf8))
+
+        return multipartURL
+    }
+
+    private func appendFormField(name: String, value: String, boundary: String, to handle: FileHandle) throws {
+        let field = "--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n"
+        try handle.write(contentsOf: Data(field.utf8))
+    }
+
+    private func appendFileField(_ sourceFile: SynologyUploadFile, boundary: String, to handle: FileHandle) throws {
+        let header = "--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(sourceFile.fileName)\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        try handle.write(contentsOf: Data(header.utf8))
+
+        let input = try FileHandle(forReadingFrom: sourceFile.fileURL)
+        defer { try? input.close() }
+
+        while true {
+            let chunk = try input.read(upToCount: 1024 * 1024) ?? Data()
+            if chunk.isEmpty {
+                break
+            }
+            try handle.write(contentsOf: chunk)
         }
     }
 
@@ -325,13 +470,24 @@ struct SynologyClient {
             throw SynologyClientError.invalidURL
         }
 
-        components.queryItems = queryItems
+        components.percentEncodedQueryItems = queryItems.map { item in
+            URLQueryItem(
+                name: percentEncodedQueryComponent(item.name),
+                value: item.value.map(percentEncodedQueryComponent)
+            )
+        }
 
         guard let finalURL = components.url else {
             throw SynologyClientError.invalidURL
         }
 
         return finalURL
+    }
+
+    private func percentEncodedQueryComponent(_ value: String) -> String {
+        var allowedCharacters = CharacterSet.urlQueryAllowed
+        allowedCharacters.remove(charactersIn: "+&=?#")
+        return value.addingPercentEncoding(withAllowedCharacters: allowedCharacters) ?? value
     }
 
     private func jsonEncodedString<T: Encodable>(_ value: T) throws -> String {
@@ -358,5 +514,63 @@ struct SynologyClient {
         } catch {
             throw SynologyClientError.decodingFailed
         }
+    }
+}
+
+private final class UploadProgressDelegate: NSObject, URLSessionDataDelegate {
+    private let progressHandler: (Double) -> Void
+    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+    private var responseData = Data()
+
+    private init(progressHandler: @escaping (Double) -> Void) {
+        self.progressHandler = progressHandler
+    }
+
+    static func upload(
+        request: URLRequest,
+        fileURL: URL,
+        progressHandler: @escaping (Double) -> Void
+    ) async throws -> (Data, URLResponse) {
+        let delegate = UploadProgressDelegate(progressHandler: progressHandler)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                delegate.continuation = continuation
+                let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+                let task = session.uploadTask(with: request, fromFile: fileURL)
+                task.resume()
+            }
+        } onCancel: {
+            progressHandler(0)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        guard totalBytesExpectedToSend > 0 else {
+            return
+        }
+
+        progressHandler(min(max(Double(totalBytesSent) / Double(totalBytesExpectedToSend), 0), 1))
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        responseData.append(data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        session.invalidateAndCancel()
+        if let error {
+            continuation?.resume(throwing: error)
+        } else if let response = task.response {
+            continuation?.resume(returning: (responseData, response))
+        } else {
+            continuation?.resume(throwing: SynologyClientError.httpError(nil))
+        }
+        continuation = nil
     }
 }

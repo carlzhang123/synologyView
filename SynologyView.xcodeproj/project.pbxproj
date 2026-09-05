@@ -16,9 +16,14 @@
 		C330F6AF304A90E80025FA9A /* SynologyViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6AE304A90E80025FA9A /* SynologyViewModel.swift */; };
 		C330F6B1304A96470025FA9A /* PlaybackProgressStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6B0304A96470025FA9A /* PlaybackProgressStore.swift */; };
 		C330F6B3304AA2080025FA9A /* FileOperationSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6B2304AA2080025FA9A /* FileOperationSettingsStore.swift */; };
+		C330F6B5304ACA120025FA9A /* PhotoLibraryUploadButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = C330F6B4304ACA120025FA9A /* PhotoLibraryUploadButton.swift */; };
+		FDD40245FD94E47D430588ED /* Pods_SynologyView.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 06DC2A118F12A3DE1BB30AC1 /* Pods_SynologyView.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		06DC2A118F12A3DE1BB30AC1 /* Pods_SynologyView.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_SynologyView.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		084633486CBDDBFF087DFE3E /* Pods-SynologyView.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SynologyView.debug.xcconfig"; path = "Target Support Files/Pods-SynologyView/Pods-SynologyView.debug.xcconfig"; sourceTree = "<group>"; };
+		4E1D90283656C7D67F1E8EAE /* Pods-SynologyView.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SynologyView.release.xcconfig"; path = "Target Support Files/Pods-SynologyView/Pods-SynologyView.release.xcconfig"; sourceTree = "<group>"; };
 		C330F694304A7A710025FA9A /* SynologyView.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SynologyView.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C330F6A2304A906E0025FA9A /* SynologyModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SynologyModels.swift; sourceTree = "<group>"; };
 		C330F6A4304A906E0025FA9A /* LoginSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginSettingsStore.swift; sourceTree = "<group>"; };
@@ -29,6 +34,7 @@
 		C330F6AE304A90E80025FA9A /* SynologyViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SynologyViewModel.swift; sourceTree = "<group>"; };
 		C330F6B0304A96470025FA9A /* PlaybackProgressStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackProgressStore.swift; sourceTree = "<group>"; };
 		C330F6B2304AA2080025FA9A /* FileOperationSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileOperationSettingsStore.swift; sourceTree = "<group>"; };
+		C330F6B4304ACA120025FA9A /* PhotoLibraryUploadButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibraryUploadButton.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -44,12 +50,22 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FDD40245FD94E47D430588ED /* Pods_SynologyView.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		787588129B23D7A9B40CCFA7 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				084633486CBDDBFF087DFE3E /* Pods-SynologyView.debug.xcconfig */,
+				4E1D90283656C7D67F1E8EAE /* Pods-SynologyView.release.xcconfig */,
+			);
+			path = Pods;
+			sourceTree = "<group>";
+		};
 		C330F68B304A7A710025FA9A = {
 			isa = PBXGroup;
 			children = (
@@ -64,6 +80,9 @@
 				C330F6AE304A90E80025FA9A /* SynologyViewModel.swift */,
 				C330F6B0304A96470025FA9A /* PlaybackProgressStore.swift */,
 				C330F6B2304AA2080025FA9A /* FileOperationSettingsStore.swift */,
+				C330F6B4304ACA120025FA9A /* PhotoLibraryUploadButton.swift */,
+				787588129B23D7A9B40CCFA7 /* Pods */,
+				F3A357F60FD78B3CF7CACC84 /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -75,6 +94,14 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		F3A357F60FD78B3CF7CACC84 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				06DC2A118F12A3DE1BB30AC1 /* Pods_SynologyView.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -82,9 +109,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = C330F69F304A7A720025FA9A /* Build configuration list for PBXNativeTarget "SynologyView" */;
 			buildPhases = (
+				A8E2B1DD902A7735CB289EB6 /* [CP] Check Pods Manifest.lock */,
 				C330F690304A7A710025FA9A /* Sources */,
 				C330F691304A7A710025FA9A /* Frameworks */,
 				C330F692304A7A710025FA9A /* Resources */,
+				90461536FE736D72E4890B0E /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
 			);
@@ -94,8 +123,6 @@
 				C330F696304A7A710025FA9A /* SynologyView */,
 			);
 			name = SynologyView;
-			packageProductDependencies = (
-			);
 			productName = SynologyView;
 			productReference = C330F694304A7A710025FA9A /* SynologyView.app */;
 			productType = "com.apple.product-type.application";
@@ -144,6 +171,52 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		90461536FE736D72E4890B0E /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-SynologyView/Pods-SynologyView-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			inputPaths = (
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-SynologyView/Pods-SynologyView-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-SynologyView/Pods-SynologyView-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+		A8E2B1DD902A7735CB289EB6 /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-SynologyView-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		C330F690304A7A710025FA9A /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -153,6 +226,7 @@
 				C330F6AD304A90BE0025FA9A /* SynologyClient.swift in Sources */,
 				C330F6A3304A906E0025FA9A /* SynologyModels.swift in Sources */,
 				C330F6A5304A906E0025FA9A /* LoginSettingsStore.swift in Sources */,
+				C330F6B5304ACA120025FA9A /* PhotoLibraryUploadButton.swift in Sources */,
 				C330F6B1304A96470025FA9A /* PlaybackProgressStore.swift in Sources */,
 				C330F6B3304AA2080025FA9A /* FileOperationSettingsStore.swift in Sources */,
 				C330F6A9304A90BD0025FA9A /* FileBrowserView.swift in Sources */,
@@ -287,6 +361,7 @@
 		};
 		C330F6A0304A7A720025FA9A /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 084633486CBDDBFF087DFE3E /* Pods-SynologyView.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -294,6 +369,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = RDHH8DR244;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -319,6 +395,7 @@
 		};
 		C330F6A1304A7A720025FA9A /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 4E1D90283656C7D67F1E8EAE /* Pods-SynologyView.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -326,6 +403,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = RDHH8DR244;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

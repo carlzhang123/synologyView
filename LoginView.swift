@@ -9,6 +9,7 @@ struct LoginView: View {
     @Binding var otpCode: String
     @Binding var trustsThisDevice: Bool
     let isLoading: Bool
+    let statusMessage: String
     let selectServerAction: (String) -> Void
     let loginAction: () -> Void
     let loginWithOTPAction: () -> Void
@@ -50,22 +51,40 @@ struct LoginView: View {
                     Button {
                         loginAction()
                     } label: {
-                        HStack {
-                            Text("登录")
-                                .fontWeight(.semibold)
+                        HStack(spacing: 10) {
                             Spacer()
                             if isLoading {
-                                ProgressView()
-                                    .tint(.white)
-                            } else {
+                                ZStack {
+                                    Circle()
+                                        .fill(.white)
+                                        .frame(width: 24, height: 24)
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .tint(.blue)
+                                }
+                            }
+                            Text(isLoading ? "正在登录" : "登录")
+                                .fontWeight(.semibold)
+                            if !isLoading {
                                 Image(systemName: "arrow.right")
                                     .fontWeight(.semibold)
                             }
+                            Spacer()
                         }
+                        .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .disabled(isLoading || serverURLString.isEmpty || account.isEmpty || password.isEmpty)
+
+                    if !statusMessage.isEmpty {
+                        Label(statusMessage, systemImage: isLoading ? "clock" : "info.circle")
+                            .font(.footnote)
+                            .foregroundStyle(isLoading ? Color.secondary : Color.red)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .padding(20)
                 .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
