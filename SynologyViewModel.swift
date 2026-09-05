@@ -33,6 +33,7 @@ final class SynologyViewModel {
     private(set) var fileStationRenameAPI: SynologyAPIInfo?
     private(set) var fileStationCopyMoveAPI: SynologyAPIInfo?
     private(set) var fileStationDeleteAPI: SynologyAPIInfo?
+    private(set) var fileStationSearchAPI: SynologyAPIInfo?
     private var sessionID: String?
     private var pathHistory: [String] = []
     private var favoritePathHistory: [String] = []
@@ -373,6 +374,46 @@ final class SynologyViewModel {
         return try? client.thumbnailURL(api: fileStationThumbAPI, for: item.path)
     }
 
+    func searchFiles(named fileName: String, in folderPaths: [String]) async throws -> [SynologyFileItem] {
+        let cleanName = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty else {
+            return []
+        }
+        guard let sessionID else {
+            throw SynologyClientError.notAuthenticated
+        }
+
+        let client = try SynologyClient(serverURLString: serverURLString, sessionID: sessionID)
+        let apis = discoveredAPIs.isEmpty ? try await client.discoverAPIs() : discoveredAPIs
+        applyDiscoveredAPIs(apis)
+        guard let fileStationSearchAPI else {
+            throw SynologyClientError.missingAPI("SYNO.FileStation.Search")
+        }
+
+        var paths = folderPaths
+            .map(normalizedPath)
+            .filter { !$0.isEmpty }
+        if paths.isEmpty {
+            guard let fileStationListAPI else {
+                throw SynologyClientError.missingAPI("SYNO.FileStation.List")
+            }
+            paths = try await client.loadSharedFolders(api: fileStationListAPI).map(\.path)
+        }
+        guard !paths.isEmpty else {
+            return []
+        }
+
+        return try await client.search(
+            api: fileStationSearchAPI,
+            fileName: cleanName,
+            folderPaths: paths
+        )
+    }
+
+    func loadSearchFolders(at path: String) async -> [SynologyFileItem] {
+        await loadMoveDestinationFolders(at: path)
+    }
+
     func rename(_ item: SynologyFileItem, to newName: String) async {
         await runNetworkOperation {
             let cleanName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -664,6 +705,7 @@ final class SynologyViewModel {
         fileStationRenameAPI = apis.first { $0.name == "SYNO.FileStation.Rename" }
         fileStationCopyMoveAPI = apis.first { $0.name == "SYNO.FileStation.CopyMove" }
         fileStationDeleteAPI = apis.first { $0.name == "SYNO.FileStation.Delete" }
+        fileStationSearchAPI = apis.first { $0.name == "SYNO.FileStation.Search" }
     }
 
     private func normalizedServerURLString(_ string: String) throws -> String {

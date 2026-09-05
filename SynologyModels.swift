@@ -162,6 +162,7 @@ struct SynologyFileListResponse: Decodable {
 struct SynologyFileListData: Decodable {
     let shares: [SynologyFilePayload]?
     let files: [SynologyFilePayload]?
+    let finished: Bool?
 }
 
 struct SynologyFavoriteListResponse: Decodable {

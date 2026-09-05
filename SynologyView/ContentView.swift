@@ -64,6 +64,12 @@ struct ContentView: View {
                     loadMoveDestinationFoldersAction: { path in
                         await model.loadMoveDestinationFolders(at: path)
                     },
+                    loadSearchFoldersAction: { path in
+                        await model.loadSearchFolders(at: path)
+                    },
+                    searchAction: { fileName, paths in
+                        try await model.searchFiles(named: fileName, in: paths)
+                    },
                     backAction: {
                         Task { await model.goBack() }
                     },

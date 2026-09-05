@@ -70,6 +70,7 @@ private struct VideoPreview: View {
     @State private var localPlaybackClockTask: Task<Void, Never>?
     @State private var localPlaybackClockAnchorDate = Date.distantPast
     @State private var localPlaybackClockAnchorTime: TimeInterval = 0
+    @State private var hasTrustedDuration = false
     @State private var usesVLCFallback = false
     @State private var vlcController = VLCPlaybackController()
     @State private var vlcPlaybackState = VLCPlaybackState()
@@ -189,7 +190,11 @@ private struct VideoPreview: View {
                 return
             }
 
-            acceptPlaybackDuration(vlcPlaybackState.duration)
+            if vlcPlaybackState.hasDurationUpperBound {
+                constrainPlaybackDuration(to: vlcPlaybackState.duration)
+            } else {
+                acceptPlaybackDuration(vlcPlaybackState.duration)
+            }
             handleVLCPlaybackState(vlcPlaybackState)
             guard let displayTime = displayPlaybackTime(from: vlcPlaybackState.currentTime) else {
                 return
@@ -247,6 +252,7 @@ private struct VideoPreview: View {
     private func startInitialPlayback() {
         if knownDuration.isFinite, knownDuration > 0 {
             duration = knownDuration
+            hasTrustedDuration = false
             debugLog("use cached duration=\(formattedDebugTime(knownDuration))")
         }
 
@@ -272,6 +278,7 @@ private struct VideoPreview: View {
         failedVLCPlaybackURLs.remove(playbackURL)
         currentTime = resumeTime > 1 ? resumeTime : 0
         duration = knownDuration.isFinite && knownDuration > 0 ? knownDuration : 0
+        hasTrustedDuration = false
         if duration > 0 {
             debugLog("use cached duration=\(formattedDebugTime(duration))")
         }
@@ -942,8 +949,16 @@ private struct VideoPreview: View {
         return duration > 0 && currentTime >= duration - 0.5
     }
 
-    private func shouldAcceptDuration(_ candidate: TimeInterval) -> Bool {
+    private func shouldAcceptDuration(_ candidate: TimeInterval, isTrusted: Bool) -> Bool {
         guard candidate.isFinite, candidate > 0 else {
+            return false
+        }
+
+        if isTrusted {
+            return duration <= 0 || abs(candidate - duration) > 1 || !hasTrustedDuration
+        }
+
+        if hasTrustedDuration {
             return false
         }
 
@@ -964,16 +979,35 @@ private struct VideoPreview: View {
         return true
     }
 
-    private func acceptPlaybackDuration(_ candidate: TimeInterval) {
-        guard shouldAcceptDuration(candidate) else {
+    private func acceptPlaybackDuration(_ candidate: TimeInterval, isTrusted: Bool = false) {
+        guard shouldAcceptDuration(candidate, isTrusted: isTrusted) else {
             return
         }
 
-        if candidate > duration {
-            debugLog("accept duration current=\(formattedDebugTime(duration)) candidate=\(formattedDebugTime(candidate))")
+        if candidate != duration {
+            let source = isTrusted ? "trusted" : "runtime"
+            debugLog("accept \(source) duration current=\(formattedDebugTime(duration)) candidate=\(formattedDebugTime(candidate))")
         }
+        hasTrustedDuration = hasTrustedDuration || isTrusted
         duration = candidate
         savePlaybackDuration(candidate)
+    }
+
+    private func constrainPlaybackDuration(to upperBound: TimeInterval) {
+        guard upperBound.isFinite, upperBound > 0 else {
+            return
+        }
+
+        guard duration <= 0 || upperBound < duration else {
+            return
+        }
+
+        debugLog("constrain duration current=\(formattedDebugTime(duration)) upperBound=\(formattedDebugTime(upperBound))")
+        duration = upperBound
+        if currentTime > upperBound {
+            currentTime = max(upperBound - 0.5, 0)
+        }
+        savePlaybackDuration(upperBound)
     }
 
     private func startLocalPlaybackClockIfNeeded() {
@@ -1023,6 +1057,13 @@ private struct VideoPreview: View {
 
     private func handleVLCPlaybackState(_ state: VLCPlaybackState) {
         if state.rawState == VLCPlaybackStateRaw.ended {
+            if let pendingSeekTarget {
+                let duration = resolvedDuration()
+                if duration <= 0 || pendingSeekTarget < duration - 2 {
+                    return
+                }
+            }
+
             isPlaying = false
             syncLocalPlaybackClock(to: currentTime)
         }
@@ -1089,7 +1130,7 @@ private struct VideoPreview: View {
                     if let transportStreamDuration = TransportStreamDurationParser.duration(headData: headChunk.data, tailData: wideTailChunk.data) {
                         await MainActor.run {
                             debugLog("TS PCR metadata duration=\(formattedDebugTime(transportStreamDuration)), head={\(headChunk.responseDescription)}, wideTail={\(wideTailChunk.responseDescription)}")
-                            acceptPlaybackDuration(transportStreamDuration)
+                            acceptPlaybackDuration(transportStreamDuration, isTrusted: true)
                         }
                     } else {
                         await MainActor.run {
@@ -1102,7 +1143,7 @@ private struct VideoPreview: View {
                 if let parsedDuration = MP4DurationParser.duration(from: headChunk.data) {
                     await MainActor.run {
                         debugLog("MP4 head metadata duration=\(formattedDebugTime(parsedDuration)), \(headChunk.responseDescription)")
-                        acceptPlaybackDuration(parsedDuration)
+                        acceptPlaybackDuration(parsedDuration, isTrusted: true)
                     }
                     return
                 }
@@ -1112,7 +1153,7 @@ private struct VideoPreview: View {
                 if let parsedDuration = MP4DurationParser.duration(from: tailChunk.data) {
                     await MainActor.run {
                         debugLog("MP4 tail metadata duration=\(formattedDebugTime(parsedDuration)), \(tailChunk.responseDescription)")
-                        acceptPlaybackDuration(parsedDuration)
+                        acceptPlaybackDuration(parsedDuration, isTrusted: true)
                     }
                     return
                 }
@@ -1122,7 +1163,7 @@ private struct VideoPreview: View {
                 if let parsedDuration = MP4DurationParser.duration(from: wideTailChunk.data) {
                     await MainActor.run {
                         debugLog("MP4 wide tail metadata duration=\(formattedDebugTime(parsedDuration)), \(wideTailChunk.responseDescription)")
-                        acceptPlaybackDuration(parsedDuration)
+                        acceptPlaybackDuration(parsedDuration, isTrusted: true)
                     }
                     return
                 }
@@ -1130,7 +1171,7 @@ private struct VideoPreview: View {
                 if let transportStreamDuration = TransportStreamDurationParser.duration(headData: headChunk.data, tailData: wideTailChunk.data) {
                     await MainActor.run {
                         debugLog("TS PCR metadata duration=\(formattedDebugTime(transportStreamDuration)), head={\(headChunk.responseDescription)}, wideTail={\(wideTailChunk.responseDescription)}")
-                        acceptPlaybackDuration(transportStreamDuration)
+                        acceptPlaybackDuration(transportStreamDuration, isTrusted: true)
                     }
                     return
                 }
@@ -1353,6 +1394,7 @@ private struct VLCFallbackVideoPlayer: View {
 private struct VLCPlaybackState: Equatable {
     var currentTime: TimeInterval = 0
     var duration: TimeInterval = 0
+    var hasDurationUpperBound = false
     var isPlaying = false
     var isSeekable = false
     var rawState = VLCPlaybackStateRaw.unknown
@@ -1512,11 +1554,15 @@ private struct VLCVideoPlayerSurface: UIViewRepresentable {
 
 private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
     private let mediaPlayer = VLCMediaPlayer()
+    private let videoContainerView = UIView()
     private let videoView = UIView()
     private var currentURL: URL?
     private var cropGeometryPointer: UnsafeMutablePointer<CChar>?
     private var durationProbeWorkItem: DispatchWorkItem?
+    private var seekRecoveryWorkItem: DispatchWorkItem?
     private var bestDuration: TimeInterval = 0
+    private var durationUpperBound: TimeInterval?
+    private var lastKnownVideoSize = CGSize.zero
     var stateChanged: ((VLCPlaybackState) -> Void)?
     var knownDuration: TimeInterval = 0 {
         didSet {
@@ -1528,13 +1574,17 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
     }
     var isAspectFill = false {
         didSet {
+            guard oldValue != isAspectFill else {
+                return
+            }
+
             updateVideoCropGeometry()
-            setNeedsLayout()
+            animateVideoLayout()
         }
     }
 
     var panOffset = CGSize.zero {
-        didSet { setNeedsLayout() }
+        didSet { layoutVideoView(animated: false) }
     }
     var allowsViewportPan = false
     var toggleControlsAction: () -> Void = {}
@@ -1561,9 +1611,13 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
         super.init(frame: frame)
         clipsToBounds = true
         backgroundColor = .black
+        videoContainerView.backgroundColor = .black
+        videoContainerView.clipsToBounds = false
         videoView.backgroundColor = .black
         videoView.clipsToBounds = true
-        addSubview(videoView)
+        videoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(videoContainerView)
+        videoContainerView.addSubview(videoView)
         mediaPlayer.drawable = videoView
         mediaPlayer.delegate = self
         gestureHandler.install(on: self)
@@ -1587,7 +1641,13 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
 
         currentURL = url
         durationProbeWorkItem?.cancel()
+        seekRecoveryWorkItem?.cancel()
+        seekRecoveryWorkItem = nil
         bestDuration = knownDuration.isFinite && knownDuration > 0 ? knownDuration : 0
+        durationUpperBound = nil
+        lastKnownVideoSize = .zero
+        panOffset = .zero
+        layoutVideoView(animated: false)
         mediaPlayer.stop()
         configureMedia(for: url)
         mediaPlayer.play()
@@ -1627,6 +1687,8 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
     func stopPlayback() {
         durationProbeWorkItem?.cancel()
         durationProbeWorkItem = nil
+        seekRecoveryWorkItem?.cancel()
+        seekRecoveryWorkItem = nil
         mediaPlayer.stop()
         mediaPlayer.delegate = nil
         mediaPlayer.drawable = nil
@@ -1640,16 +1702,16 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
             return
         }
 
-        let duration = resolvedDuration()
-        if duration > 0 {
-            mediaPlayer.position = Float(min(max(seconds / duration, 0), 1))
+        if isTerminalState, seconds < max(resolvedDuration() - 2, 0) {
+            restartPlaybackPipelineAfterSeek(at: seconds)
+            return
         }
+
+        let shouldResumeAfterSeek = shouldResumePlaybackAfterSeek()
         let milliseconds = min(seconds * 1000, Double(Int32.max))
         mediaPlayer.time = VLCTime(int: Int32(milliseconds))
         publishState(currentTime: seconds)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.publishState()
-        }
+        scheduleSeekRecovery(targetTime: seconds, shouldResume: shouldResumeAfterSeek)
     }
 
     private func configureMedia(for url: URL) {
@@ -1662,22 +1724,29 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
     }
 
     func mediaPlayerTimeChanged(_ aNotification: Notification) {
+        if rememberVideoSizeIfAvailable(), isAspectFill {
+            layoutVideoView(animated: true)
+        }
         publishState()
     }
 
     func mediaPlayerStateChanged(_ aNotification: Notification) {
+        if rememberVideoSizeIfAvailable(), isAspectFill {
+            layoutVideoView(animated: true)
+        }
         publishState()
     }
 
     private func publishState(currentTime explicitCurrentTime: TimeInterval? = nil) {
         let currentTime = explicitCurrentTime ?? seconds(from: mediaPlayer.time)
         let duration = resolvedDuration(currentTime: currentTime)
-        if duration > bestDuration {
+        if durationUpperBound == nil, duration > bestDuration {
             bestDuration = duration
         }
         let state = VLCPlaybackState(
             currentTime: currentTime,
-            duration: bestDuration,
+            duration: duration,
+            hasDurationUpperBound: durationUpperBound != nil,
             isPlaying: mediaPlayer.isPlaying,
             isSeekable: mediaPlayer.isSeekable,
             rawState: mediaPlayer.state.rawValue
@@ -1699,20 +1768,162 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
     private func resolvedDuration(currentTime: TimeInterval? = nil) -> TimeInterval {
         let mediaDuration = mediaPlayer.media.map { seconds(from: $0.length) } ?? 0
         let measuredDuration = mediaDuration
-        let position = TimeInterval(mediaPlayer.position)
-        let currentTime = currentTime ?? seconds(from: mediaPlayer.time)
-        if position >= 0.01, currentTime > 0 {
-            let inferredDuration = currentTime / position
-            if inferredDuration.isFinite, inferredDuration > 0, isReasonableInferredDuration(inferredDuration, measuredDuration: measuredDuration) {
-                return max(bestDuration, measuredDuration, inferredDuration)
+        let uncappedDuration: TimeInterval
+        if bestDuration > 0 || measuredDuration > 0 {
+            uncappedDuration = max(bestDuration, measuredDuration)
+        } else {
+            let position = TimeInterval(mediaPlayer.position)
+            let currentTime = currentTime ?? seconds(from: mediaPlayer.time)
+            if position >= 0.01, currentTime > 0 {
+                let inferredDuration = currentTime / position
+                if inferredDuration.isFinite, inferredDuration > 0, isReasonableInferredDuration(inferredDuration, measuredDuration: measuredDuration) {
+                    uncappedDuration = inferredDuration
+                } else {
+                    uncappedDuration = bestDuration
+                }
+            } else {
+                uncappedDuration = bestDuration
             }
         }
 
-        if measuredDuration > 0 {
-            return max(bestDuration, measuredDuration)
+        if let durationUpperBound {
+            return min(uncappedDuration > 0 ? uncappedDuration : durationUpperBound, durationUpperBound)
         }
 
-        return bestDuration
+        return uncappedDuration
+    }
+
+    private func shouldResumePlaybackAfterSeek() -> Bool {
+        if mediaPlayer.isPlaying {
+            return true
+        }
+
+        switch mediaPlayer.state.rawValue {
+        case VLCPlaybackStateRaw.opening, VLCPlaybackStateRaw.buffering, VLCPlaybackStateRaw.playing:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func scheduleSeekRecovery(targetTime: TimeInterval, shouldResume: Bool) {
+        seekRecoveryWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.recoverPlaybackAfterSeek(targetTime: targetTime, shouldResume: shouldResume)
+        }
+        seekRecoveryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
+    }
+
+    private func recoverPlaybackAfterSeek(targetTime: TimeInterval, shouldResume: Bool) {
+        guard currentURL != nil else {
+            return
+        }
+
+        let actualTime = seconds(from: mediaPlayer.time)
+        let duration = resolvedDuration(currentTime: actualTime)
+        if isTerminalStateAfterSeek(targetTime: targetTime, duration: duration) {
+            constrainDurationAfterTerminalSeek(targetTime: targetTime, actualTime: actualTime)
+            return
+        }
+
+        if shouldResume,
+           !mediaPlayer.isPlaying,
+           mediaPlayer.state.rawValue != VLCPlaybackStateRaw.ended,
+           mediaPlayer.state.rawValue != VLCPlaybackStateRaw.error {
+            mediaPlayer.play()
+        }
+
+        if duration > 0, targetTime > 0, abs(actualTime - targetTime) > 2 {
+            mediaPlayer.position = Float(min(max(targetTime / duration, 0), 0.999))
+        }
+
+        publishState(currentTime: targetTime)
+
+        let followUpWorkItem = DispatchWorkItem { [weak self] in
+            guard let self, self.currentURL != nil else {
+                return
+            }
+
+            let actualTime = self.seconds(from: self.mediaPlayer.time)
+            let duration = self.resolvedDuration(currentTime: actualTime)
+            if self.isTerminalStateAfterSeek(targetTime: targetTime, duration: duration) {
+                self.constrainDurationAfterTerminalSeek(targetTime: targetTime, actualTime: actualTime)
+                return
+            }
+
+            if shouldResume,
+               !self.mediaPlayer.isPlaying,
+               self.mediaPlayer.state.rawValue != VLCPlaybackStateRaw.ended,
+               self.mediaPlayer.state.rawValue != VLCPlaybackStateRaw.error {
+                self.mediaPlayer.play()
+            }
+
+            self.publishState()
+        }
+        seekRecoveryWorkItem = followUpWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: followUpWorkItem)
+    }
+
+    private var isTerminalState: Bool {
+        switch mediaPlayer.state.rawValue {
+        case VLCPlaybackStateRaw.stopped, VLCPlaybackStateRaw.ended:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func isTerminalStateAfterSeek(targetTime: TimeInterval, duration: TimeInterval) -> Bool {
+        guard duration <= 0 || targetTime < duration - 2 else {
+            return false
+        }
+
+        return isTerminalState
+    }
+
+    private func constrainDurationAfterTerminalSeek(targetTime: TimeInterval, actualTime: TimeInterval) {
+        let upperBound: TimeInterval
+        if actualTime > 1, actualTime <= targetTime + 2 {
+            upperBound = actualTime
+        } else {
+            upperBound = targetTime
+        }
+
+        guard upperBound.isFinite, upperBound > 0 else {
+            return
+        }
+
+        if durationUpperBound == nil || upperBound < (durationUpperBound ?? upperBound) {
+            durationUpperBound = upperBound
+            bestDuration = min(bestDuration > 0 ? bestDuration : upperBound, upperBound)
+        }
+
+        let displayTime = max(upperBound - 0.5, 0)
+        publishState(currentTime: displayTime)
+    }
+
+    private func restartPlaybackPipelineAfterSeek(at targetTime: TimeInterval) {
+        guard let currentURL else {
+            return
+        }
+
+        durationProbeWorkItem?.cancel()
+        mediaPlayer.stop()
+        configureMedia(for: currentURL)
+        mediaPlayer.play()
+        publishState(currentTime: targetTime)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, self.currentURL != nil else {
+                return
+            }
+
+            let milliseconds = min(targetTime * 1000, Double(Int32.max))
+            self.mediaPlayer.time = VLCTime(int: Int32(milliseconds))
+            self.mediaPlayer.play()
+            self.publishState(currentTime: targetTime)
+        }
     }
 
     private func isReasonableInferredDuration(_ inferredDuration: TimeInterval, measuredDuration: TimeInterval) -> Bool {
@@ -1758,32 +1969,51 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        updateVideoCropGeometry()
+        layoutVideoView(animated: false)
+    }
+
+    private func layoutVideoView(animated: Bool) {
         guard bounds.width > 0, bounds.height > 0 else {
+            videoContainerView.transform = .identity
+            videoContainerView.frame = bounds
             videoView.frame = bounds
             return
         }
 
-        let targetSize: CGSize
-        if isAspectFill {
-            targetSize = bounds.size
-        } else {
-            targetSize = bounds.size
-        }
+        let previousTransform = videoContainerView.transform
+        videoContainerView.transform = .identity
+        videoContainerView.frame = bounds
+        videoView.frame = videoContainerView.bounds
 
-        let maxXOffset = max((targetSize.width - bounds.width) / 2, 0)
-        let maxYOffset = max((targetSize.height - bounds.height) / 2, 0)
+        let targetScale = isAspectFill ? heightFillScale() : 1
+        let scaledWidth = bounds.width * targetScale
+        let maxXOffset = max((scaledWidth - bounds.width) / 2, 0)
         let clampedOffset = CGSize(
             width: min(max(panOffset.width, -maxXOffset), maxXOffset),
-            height: min(max(panOffset.height, -maxYOffset), maxYOffset)
+            height: 0
         )
 
-        videoView.frame = CGRect(
-            x: (bounds.width - targetSize.width) / 2 + clampedOffset.width,
-            y: (bounds.height - targetSize.height) / 2 + clampedOffset.height,
-            width: targetSize.width,
-            height: targetSize.height
+        let targetTransform = CGAffineTransform(
+            a: targetScale,
+            b: 0,
+            c: 0,
+            d: targetScale,
+            tx: clampedOffset.width,
+            ty: clampedOffset.height
         )
+
+        if animated {
+            videoContainerView.transform = previousTransform
+            UIView.animate(
+                withDuration: 0.26,
+                delay: 0,
+                options: [.curveEaseInOut, .allowUserInteraction]
+            ) {
+                self.videoContainerView.transform = targetTransform
+            }
+        } else {
+            videoContainerView.transform = targetTransform
+        }
 
         if clampedOffset != panOffset {
             DispatchQueue.main.async { [weak self] in
@@ -1792,18 +2022,56 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
         }
     }
 
-    private func updateVideoCropGeometry() {
-        guard isAspectFill, bounds.width > 0, bounds.height > 0 else {
-            clearVideoCropGeometry()
-            mediaPlayer.scaleFactor = 0
-            return
+    private func animateVideoLayout() {
+        layoutVideoView(animated: true)
+    }
+
+    private func heightFillScale() -> CGFloat {
+        guard let videoSize = currentVideoSize(),
+              bounds.width > 0,
+              bounds.height > 0 else {
+            return 1
         }
 
-        let width = max(Int(bounds.width.rounded()), 1)
-        let height = max(Int(bounds.height.rounded()), 1)
+        let aspectFitScale = min(bounds.width / videoSize.width, bounds.height / videoSize.height)
+        let fittedVideoHeight = videoSize.height * aspectFitScale
+        guard fittedVideoHeight > 0 else {
+            return 1
+        }
+
+        return max(bounds.height / fittedVideoHeight, 1)
+    }
+
+    private func currentVideoSize() -> CGSize? {
+        let videoSize = mediaPlayer.videoSize
+        if videoSize.width > 0, videoSize.height > 0 {
+            return videoSize
+        }
+
+        if lastKnownVideoSize.width > 0, lastKnownVideoSize.height > 0 {
+            return lastKnownVideoSize
+        }
+
+        return nil
+    }
+
+    @discardableResult
+    private func rememberVideoSizeIfAvailable() -> Bool {
+        let videoSize = mediaPlayer.videoSize
+        guard videoSize.width > 0, videoSize.height > 0 else {
+            return false
+        }
+
+        guard videoSize != lastKnownVideoSize else {
+            return false
+        }
+
+        lastKnownVideoSize = videoSize
+        return true
+    }
+
+    private func updateVideoCropGeometry() {
         clearVideoCropGeometry()
-        cropGeometryPointer = strdup("\(width):\(height)")
-        mediaPlayer.videoCropGeometry = cropGeometryPointer
         mediaPlayer.scaleFactor = 0
     }
 
@@ -1866,11 +2134,17 @@ private final class PlayerSurfaceView: UIView {
     }
 
     var isAspectFill = false {
-        didSet { setNeedsLayout() }
+        didSet {
+            guard oldValue != isAspectFill else {
+                return
+            }
+
+            layoutPlayerLayer(animated: true)
+        }
     }
 
     var panOffset = CGSize.zero {
-        didSet { setNeedsLayout() }
+        didSet { layoutPlayerLayer(animated: false) }
     }
     var allowsViewportPan = false
     var toggleControlsAction: () -> Void = {}
@@ -1907,12 +2181,16 @@ private final class PlayerSurfaceView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        layoutPlayerLayer(animated: false)
+    }
+
+    private func layoutPlayerLayer(animated: Bool) {
         playerLayer.videoGravity = .resizeAspect
 
         guard isAspectFill,
               bounds.width > 0,
               bounds.height > 0 else {
-            playerLayer.frame = bounds
+            setPlayerLayerFrame(bounds, animated: animated)
             return
         }
 
@@ -1920,10 +2198,11 @@ private final class PlayerSurfaceView: UIView {
         if let videoSize = playerLayer.player?.currentItem?.presentationSize,
            videoSize.width > 0,
            videoSize.height > 0 {
-            let scale = max(bounds.width / videoSize.width, bounds.height / videoSize.height)
-            fillSize = CGSize(width: videoSize.width * scale, height: videoSize.height * scale)
+            let targetHeight = bounds.height
+            let targetWidth = max(targetHeight * videoSize.width / videoSize.height, bounds.width)
+            fillSize = CGSize(width: targetWidth, height: targetHeight)
         } else {
-            fillSize = CGSize(width: bounds.width * 1.35, height: bounds.height * 1.35)
+            fillSize = bounds.size
         }
         let maxXOffset = max((fillSize.width - bounds.width) / 2, 0)
         let maxYOffset = max((fillSize.height - bounds.height) / 2, 0)
@@ -1932,18 +2211,28 @@ private final class PlayerSurfaceView: UIView {
             height: min(max(panOffset.height, -maxYOffset), maxYOffset)
         )
 
-        playerLayer.frame = CGRect(
+        let targetFrame = CGRect(
             x: (bounds.width - fillSize.width) / 2 + clampedOffset.width,
             y: (bounds.height - fillSize.height) / 2 + clampedOffset.height,
             width: fillSize.width,
             height: fillSize.height
         )
+        setPlayerLayerFrame(targetFrame, animated: animated)
 
         if clampedOffset != panOffset {
             DispatchQueue.main.async { [weak self] in
                 self?.viewportPanChangedAction(clampedOffset)
             }
         }
+    }
+
+    private func setPlayerLayerFrame(_ frame: CGRect, animated: Bool) {
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(animated ? 0.26 : 0)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
+        CATransaction.setDisableActions(!animated)
+        playerLayer.frame = frame
+        CATransaction.commit()
     }
 }
 

@@ -151,6 +151,96 @@ struct SynologyClient {
         return favorites.map(\.fileItem).sortedByKindAndName()
     }
 
+    func search(
+        api: SynologyAPIInfo,
+        fileName: String,
+        folderPaths: [String]
+    ) async throws -> [SynologyFileItem] {
+        var results: [SynologyFileItem] = []
+
+        for folderPath in folderPaths {
+            let taskID = try await startSearch(api: api, fileName: fileName, folderPath: folderPath)
+            let taskResults = try await waitForSearchResults(api: api, taskID: taskID)
+            results.append(contentsOf: taskResults)
+            try? await stopSearch(api: api, taskID: taskID)
+        }
+
+        return Dictionary(grouping: results, by: \.path)
+            .compactMap { $0.value.first }
+            .sortedByKindAndName()
+    }
+
+    private func startSearch(
+        api: SynologyAPIInfo,
+        fileName: String,
+        folderPath: String
+    ) async throws -> String {
+        let url = try makeAPIURL(
+            api: api,
+            method: "start",
+            version: min(api.maxVersion, 2),
+            parameters: [
+                URLQueryItem(name: "folder_path", value: try jsonEncodedString([folderPath])),
+                URLQueryItem(name: "pattern", value: fileName),
+                URLQueryItem(name: "recursive", value: "true"),
+                URLQueryItem(name: "filetype", value: "all")
+            ],
+            includeSession: true
+        )
+
+        let response: SynologyFileOperationResponse = try await request(url)
+        guard response.success, let taskID = response.data?.taskid, !taskID.isEmpty else {
+            throw SynologyClientError.apiError(response.error?.code, apiName: api.name)
+        }
+        return taskID
+    }
+
+    private func waitForSearchResults(
+        api: SynologyAPIInfo,
+        taskID: String
+    ) async throws -> [SynologyFileItem] {
+        for _ in 0..<60 {
+            try Task.checkCancellation()
+            let url = try makeAPIURL(
+                api: api,
+                method: "list",
+                version: min(api.maxVersion, 2),
+                parameters: [
+                    URLQueryItem(name: "taskid", value: taskID),
+                    URLQueryItem(name: "offset", value: "0"),
+                    URLQueryItem(name: "limit", value: "1000"),
+                    URLQueryItem(name: "additional", value: "[\"size\",\"time\",\"type\"]")
+                ],
+                includeSession: true
+            )
+
+            let response: SynologyFileListResponse = try await request(url)
+            guard response.success, let data = response.data else {
+                throw SynologyClientError.apiError(response.error?.code, apiName: api.name)
+            }
+            if data.finished == true {
+                return (data.files ?? []).map(\.fileItem)
+            }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+
+        throw SynologyClientError.httpError(nil)
+    }
+
+    private func stopSearch(api: SynologyAPIInfo, taskID: String) async throws {
+        let url = try makeAPIURL(
+            api: api,
+            method: "stop",
+            version: min(api.maxVersion, 2),
+            parameters: [URLQueryItem(name: "taskid", value: taskID)],
+            includeSession: true
+        )
+        let response: SynologyFileOperationResponse = try await request(url)
+        guard response.success else {
+            throw SynologyClientError.apiError(response.error?.code, apiName: api.name)
+        }
+    }
+
     func rename(api: SynologyAPIInfo, item: SynologyFileItem, newName: String) async throws {
         let url = try makeAPIURL(
             api: api,

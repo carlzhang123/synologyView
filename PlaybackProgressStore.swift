@@ -36,7 +36,7 @@ struct PlaybackProgressStore {
         }
 
         let currentDuration = self.duration(for: path)
-        guard currentDuration <= 0 || duration > currentDuration else {
+        guard currentDuration <= 0 || abs(duration - currentDuration) > 1 else {
             return
         }
 

@@ -25,6 +25,8 @@ struct FileBrowserView: View {
     let moveAction: ([SynologyFileItem], String) -> Void
     let deleteAction: ([SynologyFileItem]) -> Void
     let loadMoveDestinationFoldersAction: (String) async -> [SynologyFileItem]
+    let loadSearchFoldersAction: (String) async -> [SynologyFileItem]
+    let searchAction: (String, [String]) async throws -> [SynologyFileItem]
     let backAction: () -> Void
     let favoriteBackAction: () -> Void
     let upAction: () -> Void
@@ -108,6 +110,9 @@ struct FileBrowserView: View {
                     serverURLString: serverURLString,
                     account: account,
                     uploadProgressItems: uploadProgressItems,
+                    loadSearchFoldersAction: loadSearchFoldersAction,
+                    searchAction: searchAction,
+                    previewAction: previewAction,
                     logoutAction: logoutAction
                 )
                 .tabItem {
@@ -727,6 +732,9 @@ private struct SettingsView: View {
     let serverURLString: String
     let account: String
     let uploadProgressItems: [UploadProgressItem]
+    let loadSearchFoldersAction: (String) async -> [SynologyFileItem]
+    let searchAction: (String, [String]) async throws -> [SynologyFileItem]
+    let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
     let logoutAction: () -> Void
 
     var body: some View {
@@ -736,6 +744,18 @@ private struct SettingsView: View {
                 Label(serverURLString, systemImage: "server.rack")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("搜索") {
+                NavigationLink {
+                    AdvancedSearchView(
+                        loadFoldersAction: loadSearchFoldersAction,
+                        searchAction: searchAction,
+                        previewAction: previewAction
+                    )
+                } label: {
+                    Label("高级搜索", systemImage: "doc.text.magnifyingglass")
+                }
             }
 
             Section("任务") {
