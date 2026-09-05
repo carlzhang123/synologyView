@@ -120,6 +120,9 @@ struct ContentView: View {
                 },
                 savePlaybackDuration: { duration in
                     model.savePlaybackDuration(duration, for: item)
+                },
+                clearPlaybackProgress: {
+                    model.clearPlaybackProgress(for: item)
                 }
             )
         }

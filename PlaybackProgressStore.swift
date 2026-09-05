@@ -6,7 +6,14 @@ struct PlaybackProgressStore {
     private let durationKeyPrefix = "synology.playbackDuration."
 
     func progress(for path: String) -> TimeInterval {
-        defaults.double(forKey: key(for: path))
+        let progress = defaults.double(forKey: key(for: path))
+        let duration = duration(for: path)
+        guard duration > 0, progress >= max(duration - 20, 0) else {
+            return progress
+        }
+
+        clear(for: path)
+        return 0
     }
 
     func save(_ progress: TimeInterval, for path: String) {

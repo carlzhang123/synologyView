@@ -364,6 +364,10 @@ final class SynologyViewModel {
         playbackProgressStore.saveDuration(duration, for: item.file.path)
     }
 
+    func clearPlaybackProgress(for item: SynologyFilePreviewItem) {
+        playbackProgressStore.clear(for: item.file.path)
+    }
+
     func thumbnailURL(for item: SynologyFileItem) -> URL? {
         guard item.isPreviewable,
               sessionID != nil,

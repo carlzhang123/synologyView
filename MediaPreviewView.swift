@@ -10,6 +10,7 @@ struct MediaPreviewView: View {
     let item: SynologyFilePreviewItem
     let savePlaybackProgress: (TimeInterval) -> Void
     let savePlaybackDuration: (TimeInterval) -> Void
+    let clearPlaybackProgress: () -> Void
 
     var body: some View {
         Group {
@@ -21,7 +22,8 @@ struct MediaPreviewView: View {
                     resumeTime: item.resumeTime,
                     knownDuration: item.knownDuration,
                     savePlaybackProgress: savePlaybackProgress,
-                    savePlaybackDuration: savePlaybackDuration
+                    savePlaybackDuration: savePlaybackDuration,
+                    clearPlaybackProgress: clearPlaybackProgress
                 )
             } else if item.file.isImage {
                 ImagePreview(
@@ -45,6 +47,7 @@ private struct VideoPreview: View {
     let knownDuration: TimeInterval
     let savePlaybackProgress: (TimeInterval) -> Void
     let savePlaybackDuration: (TimeInterval) -> Void
+    let clearPlaybackProgress: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var player: AVPlayer?
     @State private var timeObserverToken: Any?
@@ -61,7 +64,6 @@ private struct VideoPreview: View {
     @State private var pendingSeekTarget: TimeInterval?
     @State private var seekDisplayAnchorDate = Date.distantPast
     @State private var seekDisplayTask: Task<Void, Never>?
-    @State private var lastSeekProtectionLogDate = Date.distantPast
     @State private var playbackErrorMessage: String?
     @State private var itemStatusObservation: NSKeyValueObservation?
     @State private var playbackDiagnosticTask: Task<Void, Never>?
@@ -77,6 +79,7 @@ private struct VideoPreview: View {
     @State private var playbackURLIndex = 0
     @State private var currentPlaybackURL: URL?
     @State private var failedVLCPlaybackURLs = Set<URL>()
+    @State private var hasCompletedPlayback = false
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -180,9 +183,12 @@ private struct VideoPreview: View {
         .statusBarHidden()
         .task {
             startInitialPlayback()
+            await observeNativePlaybackEnd()
         }
         .onDisappear {
-            saveCurrentProgress()
+            if !hasCompletedPlayback {
+                saveCurrentProgress()
+            }
             cleanupPlayback()
         }
         .onChange(of: vlcPlaybackState) {
@@ -196,14 +202,15 @@ private struct VideoPreview: View {
                 acceptPlaybackDuration(vlcPlaybackState.duration)
             }
             handleVLCPlaybackState(vlcPlaybackState)
-            guard let displayTime = displayPlaybackTime(from: vlcPlaybackState.currentTime) else {
+            guard !hasCompletedPlayback,
+                  let displayTime = displayPlaybackTime(from: vlcPlaybackState.currentTime) else {
                 return
             }
 
             currentTime = displayTime
             syncLocalPlaybackClock(to: displayTime)
             if displayTime > 1 {
-                savePlaybackProgress(displayTime)
+                saveProgressIfNeeded(displayTime)
             }
         }
     }
@@ -253,7 +260,6 @@ private struct VideoPreview: View {
         if knownDuration.isFinite, knownDuration > 0 {
             duration = knownDuration
             hasTrustedDuration = false
-            debugLog("use cached duration=\(formattedDebugTime(knownDuration))")
         }
 
         playbackURLIndex = 0
@@ -266,7 +272,6 @@ private struct VideoPreview: View {
     }
 
     private func startVLCPlayback(from playbackURL: URL, reason: String) {
-        debugLog("start VLC candidate=\(playbackURLIndex + 1)/\(orderedPlaybackURLs.count), local=\(playbackURL.isFileURL), url=\(redactedURLString(playbackURL)), reason=\(reason)")
         playbackDiagnosticTask?.cancel()
         playbackDiagnosticTask = nil
         removeProgressObserver()
@@ -280,7 +285,6 @@ private struct VideoPreview: View {
         duration = knownDuration.isFinite && knownDuration > 0 ? knownDuration : 0
         hasTrustedDuration = false
         if duration > 0 {
-            debugLog("use cached duration=\(formattedDebugTime(duration))")
         }
         isPlaying = true
         isSeeking = false
@@ -306,7 +310,6 @@ private struct VideoPreview: View {
         playbackErrorMessage = nil
         currentPlaybackURL = playbackURL
 
-        debugLog("start candidate=\(playbackURLIndex + 1)/\(orderedPlaybackURLs.count), local=\(playbackURL.isFileURL), url=\(redactedURLString(playbackURL))")
 
         let playerItem = AVPlayerItem(asset: playbackAsset(for: playbackURL))
         observeStatus(for: playerItem, allowsURLFallback: allowsURLFallback, allowsLocalFallback: allowsLocalFallback)
@@ -330,7 +333,6 @@ private struct VideoPreview: View {
             return AVURLAsset(url: playbackURL)
         }
 
-        debugLog("override MIME type=\(mimeType)")
         return AVURLAsset(
             url: playbackURL,
             options: [AVURLAssetOverrideMIMETypeKey: mimeType]
@@ -381,15 +383,11 @@ private struct VideoPreview: View {
             Task { @MainActor in
                 switch observedItem.status {
                 case .readyToPlay:
-                    debugLog("AVPlayerItem readyToPlay duration=\(observedItem.duration.seconds) presentationSize=\(observedItem.presentationSize)")
                     acceptPlaybackDuration(observedItem.duration.seconds)
                     currentTime = player?.currentTime().seconds ?? currentTime
-                    debugPlaybackLogs(for: observedItem)
                     playbackErrorMessage = nil
                     diagnosePlayableTracks(for: observedItem, allowsLocalFallback: allowsLocalFallback)
                 case .failed:
-                    debugLog("AVPlayerItem failed error=\(debugErrorDescription(observedItem.error))")
-                    debugPlaybackLogs(for: observedItem)
                     isPlaying = false
                     if allowsLocalFallback, shouldPreferVLCFallback(for: observedItem.error) {
                         startVLCFallback(reason: "remote URL probes as media but AVPlayer cannot open it")
@@ -440,7 +438,6 @@ private struct VideoPreview: View {
                 let videoTracks = mediaTracks.filter { $0.mediaType == .video }
                 let audioTracks = mediaTracks.filter { $0.mediaType == .audio }
                 await MainActor.run {
-                    debugLog("track diagnostics video=\(videoTracks.map(\.debugDescription)), audio=\(audioTracks.map(\.debugDescription))")
                 }
                 let hasPlayableVideo = videoTracks.contains { $0.isPlayable && $0.isDecodable }
                 let hasPlayableAudio = audioTracks.isEmpty || audioTracks.contains { $0.isPlayable && $0.isDecodable }
@@ -477,7 +474,6 @@ private struct VideoPreview: View {
 
         playbackURLIndex = nextIndex
         playbackErrorMessage = "正在尝试另一种群晖下载链接..."
-        debugLog("switch remote candidate to \(nextIndex + 1)/\(urls.count)")
         startPlayback(from: urls[nextIndex], resumeFromSavedProgress: false, allowsURLFallback: true, allowsLocalFallback: true)
         if currentTime > 1, let player {
             seek(to: currentTime, player: player)
@@ -489,14 +485,12 @@ private struct VideoPreview: View {
         let urls = orderedPlaybackURLs
         let nextIndex = playbackURLIndex + 1
         guard urls.indices.contains(nextIndex) else {
-            debugLog("VLC fallback exhausted: \(reason)")
             playbackErrorMessage = "VLC 内核无法打开这个视频。请尝试转码，或检查该文件是否损坏。"
             isPlaying = false
             return false
         }
 
         playbackURLIndex = nextIndex
-        debugLog("switch VLC candidate to \(nextIndex + 1)/\(urls.count): \(reason)")
         startVLCPlayback(from: urls[nextIndex], reason: reason)
         return true
     }
@@ -528,70 +522,6 @@ private struct VideoPreview: View {
         }
     }
 
-    private func debugPlaybackLogs(for item: AVPlayerItem) {
-        if let errorEvents = item.errorLog()?.events, !errorEvents.isEmpty {
-            for event in errorEvents {
-                debugLog("errorLog status=\(event.errorStatusCode), domain=\(event.errorDomain), comment=\(event.errorComment ?? "nil"), server=\(event.serverAddress ?? "nil"), uri=\(redactedURLString(event.uri))")
-                debugLog("errorLog headers=\(event.allHTTPResponseHeaderFields ?? [:])")
-            }
-        } else {
-            debugLog("errorLog empty")
-        }
-
-        if let accessEvents = item.accessLog()?.events, !accessEvents.isEmpty {
-            for event in accessEvents {
-                debugLog("accessLog bytes=\(event.numberOfBytesTransferred), transferDuration=\(event.transferDuration), stalls=\(event.numberOfStalls), droppedFrames=\(event.numberOfDroppedVideoFrames), playbackType=\(event.playbackType ?? "nil"), uri=\(redactedURLString(event.uri))")
-            }
-        } else {
-            debugLog("accessLog empty")
-        }
-    }
-
-    private func debugErrorDescription(_ error: Error?) -> String {
-        guard let error else {
-            return "nil"
-        }
-
-        if let avError = error as? AVError {
-            return "AVError code=\(avError.code.rawValue)/\(avError.code), localized=\(avError.localizedDescription), underlying=\(String(describing: avError.userInfo[NSUnderlyingErrorKey]))"
-        }
-
-        let nsError = error as NSError
-        return "NSError domain=\(nsError.domain), code=\(nsError.code), localized=\(nsError.localizedDescription), userInfo=\(nsError.userInfo)"
-    }
-
-    private func redactedURLString(_ string: String?) -> String {
-        guard let string else {
-            return "nil"
-        }
-
-        return redactedURLString(string)
-    }
-
-    private func redactedURLString(_ url: URL) -> String {
-        redactedURLString(url.absoluteString)
-    }
-
-    private func redactedURLString(_ rawURLString: String) -> String {
-        rawURLString.replacingOccurrences(
-            of: "([?&]_sid=)[^&]+",
-            with: "$1<redacted>",
-            options: .regularExpression
-        )
-    }
-
-    private func debugLog(_ message: String) {
-        print("[SynologyVideoDebug] \(fileName): \(message)")
-    }
-
-    private func formattedDebugTime(_ time: TimeInterval) -> String {
-        guard time.isFinite, time >= 0 else {
-            return "invalid"
-        }
-
-        return String(format: "%.2fs", time)
-    }
-
     private func playbackErrorDescription(for error: Error?) -> String {
         guard let error else {
             return "视频无法播放，可能是编码格式不受 iOS 原生播放器支持。"
@@ -611,11 +541,37 @@ private struct VideoPreview: View {
         return "视频无法播放：\(error.localizedDescription)"
     }
 
+    private func observeNativePlaybackEnd() async {
+        for await notification in NotificationCenter.default.notifications(
+            named: .AVPlayerItemDidPlayToEndTime
+        ) {
+            guard !Task.isCancelled,
+                  let endedItem = notification.object as? AVPlayerItem,
+                  endedItem === player?.currentItem else {
+                continue
+            }
+
+            completePlayback()
+            return
+        }
+    }
+
+    private func completePlayback() {
+        guard !hasCompletedPlayback else {
+            return
+        }
+
+        hasCompletedPlayback = true
+        isPlaying = false
+        clearPlaybackProgress()
+        dismiss()
+    }
+
     private func addProgressObserver(to player: AVPlayer) {
         let interval = CMTime(seconds: 1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
             let seconds = time.seconds
-            guard seconds.isFinite, seconds > 1 else {
+            guard !hasCompletedPlayback, seconds.isFinite, seconds > 1 else {
                 return
             }
 
@@ -624,7 +580,7 @@ private struct VideoPreview: View {
             }
             acceptPlaybackDuration(player.currentItem?.duration.seconds ?? 0)
             isPlaying = player.timeControlStatus == .playing
-            savePlaybackProgress(seconds)
+            saveProgressIfNeeded(seconds)
         }
     }
 
@@ -637,13 +593,27 @@ private struct VideoPreview: View {
         self.timeObserverToken = nil
     }
 
+    private func saveProgressIfNeeded(_ progress: TimeInterval) {
+        guard !hasCompletedPlayback, progress.isFinite, progress > 1 else {
+            return
+        }
+
+        let duration = resolvedDuration()
+        if duration > 0, progress >= max(duration - 20, 0) {
+            clearPlaybackProgress()
+            return
+        }
+
+        savePlaybackProgress(progress)
+    }
+
     private func saveCurrentProgress() {
         if usesVLCFallback {
             guard currentTime.isFinite, currentTime > 1 else {
                 return
             }
 
-            savePlaybackProgress(currentTime)
+            saveProgressIfNeeded(currentTime)
             return
         }
 
@@ -656,13 +626,12 @@ private struct VideoPreview: View {
             return
         }
 
-        savePlaybackProgress(seconds)
+        saveProgressIfNeeded(seconds)
     }
 
     private func togglePlayback() {
         if usesVLCFallback {
             if isPlaying {
-                debugLog("VLC command pause current=\(formattedDebugTime(currentTime))")
                 vlcController.pause()
                 isPlaying = false
                 syncLocalPlaybackClock(to: currentTime)
@@ -671,7 +640,6 @@ private struct VideoPreview: View {
                     seekDisplayAnchorDate = Date()
                 }
             } else {
-                debugLog("VLC command play current=\(formattedDebugTime(currentTime))")
                 if isAtPlaybackEnd || vlcPlaybackState.rawState == VLCPlaybackStateRaw.ended {
                     currentTime = isAtPlaybackEnd ? 0 : currentTime
                     syncLocalPlaybackClock(to: currentTime)
@@ -757,13 +725,11 @@ private struct VideoPreview: View {
 
     private func seek(to seconds: TimeInterval) {
         guard isCurrentPlaybackSeekable else {
-            debugLog("seek ignored because current playback is not seekable")
             return
         }
 
         if usesVLCFallback {
-            let targetTime = clampedPlaybackTime(seconds)
-            debugLog("VLC command seek from=\(formattedDebugTime(currentTime)) target=\(formattedDebugTime(targetTime)) duration=\(formattedDebugTime(resolvedDuration()))")
+            let targetTime = clampedSeekTime(seconds)
             currentTime = targetTime
             isSeeking = true
             beginSeekProtection(to: targetTime)
@@ -774,7 +740,7 @@ private struct VideoPreview: View {
             } else {
                 vlcController.seek(to: targetTime)
             }
-            savePlaybackProgress(targetTime)
+            saveProgressIfNeeded(targetTime)
             isSeeking = false
             isDraggingControlBar = false
             return
@@ -788,7 +754,7 @@ private struct VideoPreview: View {
     }
 
     private func seek(to seconds: TimeInterval, player: AVPlayer) {
-        let targetTime = clampedPlaybackTime(seconds)
+        let targetTime = clampedSeekTime(seconds)
         let time = CMTime(seconds: targetTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         currentTime = targetTime
         isSeeking = true
@@ -800,7 +766,7 @@ private struct VideoPreview: View {
                 isSeeking = false
             }
         }
-        savePlaybackProgress(targetTime)
+        saveProgressIfNeeded(targetTime)
     }
 
     private func seekDuringScrub(to seconds: TimeInterval) {
@@ -808,7 +774,7 @@ private struct VideoPreview: View {
             return
         }
 
-        let targetTime = clampedPlaybackTime(seconds)
+        let targetTime = clampedSeekTime(seconds)
         if usesVLCFallback {
             currentTime = targetTime
             isSeeking = true
@@ -835,7 +801,8 @@ private struct VideoPreview: View {
 
         let secondsPerPoint = resolvedDuration / 600
         let startTime = scrubStartTime ?? currentTime
-        let targetTime = min(max(startTime + TimeInterval(horizontalTranslation) * secondsPerPoint, 0), resolvedDuration)
+        let requestedTime = startTime + TimeInterval(horizontalTranslation) * secondsPerPoint
+        let targetTime = clampedSeekTime(requestedTime)
         return VideoScrubPreview(
             startTime: startTime,
             targetTime: targetTime,
@@ -864,14 +831,12 @@ private struct VideoPreview: View {
     private func beginSeekProtection(to targetTime: TimeInterval) {
         pendingSeekTarget = targetTime
         seekDisplayAnchorDate = Date()
-        lastSeekProtectionLogDate = .distantPast
         startSeekDisplayTask()
     }
 
     private func clearSeekProtection() {
         pendingSeekTarget = nil
         seekDisplayAnchorDate = .distantPast
-        lastSeekProtectionLogDate = .distantPast
         seekDisplayTask?.cancel()
         seekDisplayTask = nil
     }
@@ -908,27 +873,17 @@ private struct VideoPreview: View {
         }
 
         let expectedDisplayTime = protectedDisplayTime(from: pendingSeekTarget)
-        logSeekProtectionIfNeeded(playbackTime: playbackTime, displayTime: expectedDisplayTime, targetTime: pendingSeekTarget)
+        if abs(playbackTime - expectedDisplayTime) <= 1.5 {
+            clearSeekProtection()
+            return playbackTime
+        }
+
         return expectedDisplayTime
     }
 
     private func protectedDisplayTime(from targetTime: TimeInterval) -> TimeInterval {
         let elapsed = isPlaying ? Date().timeIntervalSince(seekDisplayAnchorDate) : 0
         return clampedPlaybackTime(targetTime + max(elapsed, 0))
-    }
-
-    private func logSeekProtectionIfNeeded(playbackTime: TimeInterval, displayTime: TimeInterval, targetTime: TimeInterval) {
-        guard abs(playbackTime - displayTime) > 2 else {
-            return
-        }
-
-        let now = Date()
-        guard now.timeIntervalSince(lastSeekProtectionLogDate) >= 2 else {
-            return
-        }
-
-        lastSeekProtectionLogDate = now
-        debugLog("VLC time ignored during protected seek vlc=\(formattedDebugTime(playbackTime)) display=\(formattedDebugTime(displayTime)) target=\(formattedDebugTime(targetTime))")
     }
 
     private func resolvedDuration() -> TimeInterval {
@@ -972,7 +927,6 @@ private struct VideoPreview: View {
 
         let maximumReasonableCorrection = duration * 1.75
         if candidate > maximumReasonableCorrection {
-            debugLog("ignored unreasonable duration jump current=\(formattedDebugTime(duration)) candidate=\(formattedDebugTime(candidate))")
             return false
         }
 
@@ -985,8 +939,6 @@ private struct VideoPreview: View {
         }
 
         if candidate != duration {
-            let source = isTrusted ? "trusted" : "runtime"
-            debugLog("accept \(source) duration current=\(formattedDebugTime(duration)) candidate=\(formattedDebugTime(candidate))")
         }
         hasTrustedDuration = hasTrustedDuration || isTrusted
         duration = candidate
@@ -1002,7 +954,6 @@ private struct VideoPreview: View {
             return
         }
 
-        debugLog("constrain duration current=\(formattedDebugTime(duration)) upperBound=\(formattedDebugTime(upperBound))")
         duration = upperBound
         if currentTime > upperBound {
             currentTime = max(upperBound - 0.5, 0)
@@ -1032,8 +983,8 @@ private struct VideoPreview: View {
                 let elapsed = Date().timeIntervalSince(localPlaybackClockAnchorDate)
                 let displayTime = clampedPlaybackTime(localPlaybackClockAnchorTime + max(elapsed, 0))
                 currentTime = displayTime
-                if displayTime > 1 {
-                    savePlaybackProgress(displayTime)
+                if !hasCompletedPlayback, displayTime > 1 {
+                    saveProgressIfNeeded(displayTime)
                 }
             }
         }
@@ -1057,15 +1008,13 @@ private struct VideoPreview: View {
 
     private func handleVLCPlaybackState(_ state: VLCPlaybackState) {
         if state.rawState == VLCPlaybackStateRaw.ended {
-            if let pendingSeekTarget {
-                let duration = resolvedDuration()
-                if duration <= 0 || pendingSeekTarget < duration - 2 {
-                    return
-                }
-            }
-
+            clearSeekProtection()
+            isSeeking = false
+            isDraggingControlBar = false
             isPlaying = false
             syncLocalPlaybackClock(to: currentTime)
+            completePlayback()
+            return
         }
 
         if isTransportStreamFile {
@@ -1129,12 +1078,10 @@ private struct VideoPreview: View {
                     try Task.checkCancellation()
                     if let transportStreamDuration = TransportStreamDurationParser.duration(headData: headChunk.data, tailData: wideTailChunk.data) {
                         await MainActor.run {
-                            debugLog("TS PCR metadata duration=\(formattedDebugTime(transportStreamDuration)), head={\(headChunk.responseDescription)}, wideTail={\(wideTailChunk.responseDescription)}")
                             acceptPlaybackDuration(transportStreamDuration, isTrusted: true)
                         }
                     } else {
                         await MainActor.run {
-                            debugLog("TS PCR metadata duration unavailable: head={\(headChunk.responseDescription), \(MP4DurationParser.debugSummary(for: headChunk.data))}, wideTail={\(wideTailChunk.responseDescription), \(MP4DurationParser.debugSummary(for: wideTailChunk.data))}")
                         }
                     }
                     return
@@ -1142,7 +1089,6 @@ private struct VideoPreview: View {
 
                 if let parsedDuration = MP4DurationParser.duration(from: headChunk.data) {
                     await MainActor.run {
-                        debugLog("MP4 head metadata duration=\(formattedDebugTime(parsedDuration)), \(headChunk.responseDescription)")
                         acceptPlaybackDuration(parsedDuration, isTrusted: true)
                     }
                     return
@@ -1152,7 +1098,6 @@ private struct VideoPreview: View {
                 try Task.checkCancellation()
                 if let parsedDuration = MP4DurationParser.duration(from: tailChunk.data) {
                     await MainActor.run {
-                        debugLog("MP4 tail metadata duration=\(formattedDebugTime(parsedDuration)), \(tailChunk.responseDescription)")
                         acceptPlaybackDuration(parsedDuration, isTrusted: true)
                     }
                     return
@@ -1162,7 +1107,6 @@ private struct VideoPreview: View {
                 try Task.checkCancellation()
                 if let parsedDuration = MP4DurationParser.duration(from: wideTailChunk.data) {
                     await MainActor.run {
-                        debugLog("MP4 wide tail metadata duration=\(formattedDebugTime(parsedDuration)), \(wideTailChunk.responseDescription)")
                         acceptPlaybackDuration(parsedDuration, isTrusted: true)
                     }
                     return
@@ -1170,19 +1114,16 @@ private struct VideoPreview: View {
 
                 if let transportStreamDuration = TransportStreamDurationParser.duration(headData: headChunk.data, tailData: wideTailChunk.data) {
                     await MainActor.run {
-                        debugLog("TS PCR metadata duration=\(formattedDebugTime(transportStreamDuration)), head={\(headChunk.responseDescription)}, wideTail={\(wideTailChunk.responseDescription)}")
                         acceptPlaybackDuration(transportStreamDuration, isTrusted: true)
                     }
                     return
                 }
 
                 await MainActor.run {
-                    debugLog("MP4 metadata duration unavailable: head={\(headChunk.responseDescription), \(MP4DurationParser.debugSummary(for: headChunk.data))}, tail={\(tailChunk.responseDescription), \(MP4DurationParser.debugSummary(for: tailChunk.data))}, wideTail={\(wideTailChunk.responseDescription), \(MP4DurationParser.debugSummary(for: wideTailChunk.data))}")
                 }
             } catch is CancellationError {
             } catch {
                 await MainActor.run {
-                    debugLog("MP4 metadata duration unavailable: \(error.localizedDescription)")
                 }
             }
         }
@@ -1245,7 +1186,17 @@ private struct VideoPreview: View {
             return max(seconds, 0)
         }
 
-        let maximumSeekTime = max(duration - 0.5, 0)
+        return min(max(seconds, 0), duration)
+    }
+
+    private func clampedSeekTime(_ seconds: TimeInterval) -> TimeInterval {
+        let duration = resolvedDuration()
+        guard duration > 0 else {
+            return max(seconds, 0)
+        }
+
+        let endSeekSafetyInterval = min(2, duration * 0.1)
+        let maximumSeekTime = max(duration - endSeekSafetyInterval, 0)
         return min(max(seconds, 0), maximumSeekTime)
     }
 }
@@ -2508,22 +2459,23 @@ private struct VideoControlsBar: View {
                 Slider(
                     value: Binding(
                         get: {
-                            isDraggingSlider ? sliderValue : currentTime
+                            sliderValue
                         },
                         set: { newValue in
                             guard isSeekable else {
                                 return
                             }
 
-                            sliderValue = newValue
-                            seekPreviewAction(newValue)
+                            let safeValue = min(max(newValue, 0), maximumSeekTime)
+                            sliderValue = safeValue
+                            seekPreviewAction(safeValue)
                         }
                     ),
                     in: 0...max(duration, 1),
                     onEditingChanged: { isEditing in
                         isDraggingSlider = isEditing
                         if isEditing {
-                            sliderValue = currentTime
+                            sliderValue = min(currentTime, maximumSeekTime)
                             editingChangedAction(true)
                         } else {
                             if isSeekable {
@@ -2535,6 +2487,19 @@ private struct VideoControlsBar: View {
                 )
                 .tint(.white)
                 .disabled(!isSeekable)
+                .onAppear {
+                    sliderValue = clampedDisplayTime(currentTime)
+                }
+                .onChange(of: currentTime) {
+                    if !isDraggingSlider {
+                        sliderValue = clampedDisplayTime(currentTime)
+                    }
+                }
+                .onChange(of: duration) {
+                    if !isDraggingSlider {
+                        sliderValue = clampedDisplayTime(currentTime)
+                    }
+                }
 
                 Text(timeText)
                     .font(.caption.monospacedDigit())
@@ -2557,12 +2522,25 @@ private struct VideoControlsBar: View {
         )
     }
 
+    private func clampedDisplayTime(_ time: TimeInterval) -> TimeInterval {
+        min(max(time, 0), max(duration, 1))
+    }
+
+    private var maximumSeekTime: TimeInterval {
+        guard duration > 0 else {
+            return 0
+        }
+
+        let endSeekSafetyInterval = min(2, duration * 0.1)
+        return max(duration - endSeekSafetyInterval, 0)
+    }
+
     private var timeText: String {
         if !isSeekable, duration > 0 {
             return "\(formatted(currentTime)) / \(formatted(duration)) 不可拖动"
         }
 
-        return "\(formatted(isDraggingSlider ? sliderValue : currentTime)) / \(formatted(duration))"
+        return "\(formatted(sliderValue)) / \(formatted(duration))"
     }
 
     private func formatted(_ time: TimeInterval) -> String {
@@ -2592,17 +2570,6 @@ private enum MP4DurationParser {
         }
 
         return scannedMovieHeaderDuration(from: data)
-    }
-
-    static func debugSummary(for data: Data) -> String {
-        let topLevelBoxes = boxes(in: 0..<data.count, data: data)
-            .prefix(8)
-            .map { "\($0.type)@\($0.range.lowerBound)+\($0.range.count)" }
-            .joined(separator: ", ")
-        let ftypOffset = signatureOffset("ftyp", in: data)
-        let moovOffset = signatureOffset("moov", in: data)
-        let mvhdOffset = signatureOffset("mvhd", in: data)
-        return "bytes=\(data.count), first=\(firstBytesHex(in: data)), boxes=\(topLevelBoxes.isEmpty ? "none" : topLevelBoxes), ftyp=\(debugOffset(ftypOffset)), moov=\(debugOffset(moovOffset)), mvhd=\(debugOffset(mvhdOffset)), likelyTS=\(TransportStreamDurationParser.isLikelyTransportStream(data))"
     }
 
     private static func scannedMovieHeaderDuration(from data: Data) -> TimeInterval? {
@@ -2671,20 +2638,6 @@ private enum MP4DurationParser {
 
     private static func box(named name: String, in range: Range<Int>, data: Data) -> MP4Box? {
         boxes(in: range, data: data).first { $0.type == name }
-    }
-
-    private static func signatureOffset(_ signature: String, in data: Data) -> Int? {
-        data.firstRange(of: Data(signature.utf8))?.lowerBound
-    }
-
-    private static func debugOffset(_ offset: Int?) -> String {
-        offset.map(String.init) ?? "nil"
-    }
-
-    private static func firstBytesHex(in data: Data) -> String {
-        data.prefix(16)
-            .map { String(format: "%02x", $0) }
-            .joined(separator: " ")
     }
 
     private static func boxes(in range: Range<Int>, data: Data) -> [MP4Box] {
