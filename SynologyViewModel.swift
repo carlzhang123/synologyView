@@ -358,6 +358,11 @@ final class SynologyViewModel {
 
     func savePlaybackProgress(_ progress: TimeInterval, for item: SynologyFilePreviewItem) {
         playbackProgressStore.save(progress, for: item.file.path)
+        CinemaViewingStateStore().update(
+            path: item.file.path,
+            serverURLString: serverURLString,
+            account: account
+        ) { $0.lastPlayedAt = Date() }
     }
 
     func savePlaybackDuration(_ duration: TimeInterval, for item: SynologyFilePreviewItem) {
@@ -366,6 +371,29 @@ final class SynologyViewModel {
 
     func clearPlaybackProgress(for item: SynologyFilePreviewItem) {
         playbackProgressStore.clear(for: item.file.path)
+        CinemaViewingStateStore().update(
+            path: item.file.path,
+            serverURLString: serverURLString,
+            account: account
+        ) {
+            $0.isWatched = true
+            $0.lastPlayedAt = Date()
+        }
+    }
+
+    func playbackProgress(for path: String?) -> TimeInterval {
+        guard let path else { return 0 }
+        return playbackProgressStore.progress(for: path)
+    }
+
+    func playbackDuration(for path: String?) -> TimeInterval {
+        guard let path else { return 0 }
+        return playbackProgressStore.duration(for: path)
+    }
+
+    func clearCinemaPlaybackProgress(for path: String?) {
+        guard let path else { return }
+        playbackProgressStore.clear(for: path)
     }
 
     func thumbnailURL(for item: SynologyFileItem) -> URL? {
@@ -376,6 +404,58 @@ final class SynologyViewModel {
         }
 
         return try? client.thumbnailURL(api: fileStationThumbAPI, for: item.path)
+    }
+
+    func scanCinemaLibraries(
+        _ libraries: [CinemaLibraryFolder],
+        cachedItems: [CinemaScannedItem]
+    ) async throws -> [CinemaScannedItem] {
+        guard let sessionID else {
+            throw SynologyClientError.notAuthenticated
+        }
+        guard let fileStationListAPI else {
+            throw SynologyClientError.missingAPI("SYNO.FileStation.List")
+        }
+
+        let client = try SynologyClient(serverURLString: serverURLString, sessionID: sessionID)
+        let scanner = CinemaLibraryScanner(
+            loadFolder: { path in
+                try await client.loadFolder(api: fileStationListAPI, path: path)
+            },
+            loadData: { path in
+                try await client.downloadData(api: self.fileStationDownloadAPI, for: path)
+            }
+        )
+        return try await scanner.scan(libraries, cachedItems: cachedItems)
+    }
+
+    func cinemaThumbnailURL(for path: String?) -> URL? {
+        guard let path, let sessionID,
+              let client = try? SynologyClient(serverURLString: serverURLString, sessionID: sessionID) else {
+            return nil
+        }
+        return try? client.thumbnailURL(api: fileStationThumbAPI, for: path, size: "medium")
+    }
+
+    func cinemaArtworkURL(for path: String?) -> URL? {
+        guard let path, let sessionID,
+              let client = try? SynologyClient(serverURLString: serverURLString, sessionID: sessionID) else {
+            return nil
+        }
+        return try? client.downloadURL(api: fileStationDownloadAPI, for: path)
+    }
+
+    func previewCinemaItem(_ item: CinemaScannedItem) {
+        guard let videoPath = item.videoPath else { return }
+        let file = SynologyFileItem(
+            id: videoPath,
+            name: URL(fileURLWithPath: videoPath).lastPathComponent,
+            path: videoPath,
+            isDirectory: false,
+            size: nil,
+            modifiedTime: nil
+        )
+        preview(file)
     }
 
     func searchFiles(named fileName: String, in folderPaths: [String]) async throws -> [SynologyFileItem] {

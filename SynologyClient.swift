@@ -397,6 +397,19 @@ struct SynologyClient {
         try downloadURLVariants(api: api, for: path).first ?? makeDownloadURL(api: api, pathValue: path, mode: "open")
     }
 
+    func downloadData(api: SynologyAPIInfo?, for path: String) async throws -> Data {
+        let url = try downloadURL(api: api, for: path)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              200..<300 ~= httpResponse.statusCode else {
+            throw SynologyClientError.httpError((response as? HTTPURLResponse)?.statusCode)
+        }
+        return data
+    }
+
     func downloadURLVariants(api: SynologyAPIInfo?, for path: String) throws -> [URL] {
         guard sessionID != nil else {
             throw SynologyClientError.notAuthenticated

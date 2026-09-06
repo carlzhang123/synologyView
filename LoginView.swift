@@ -56,7 +56,7 @@ struct LoginView: View {
                             if isLoading {
                                 ZStack {
                                     Circle()
-                                        .fill(.white)
+                                        .fill(Color(.systemBackground))
                                         .frame(width: 24, height: 24)
                                     ProgressView()
                                         .controlSize(.small)

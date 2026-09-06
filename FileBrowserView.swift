@@ -27,6 +27,14 @@ struct FileBrowserView: View {
     let loadMoveDestinationFoldersAction: (String) async -> [SynologyFileItem]
     let loadSearchFoldersAction: (String) async -> [SynologyFileItem]
     let searchAction: (String, [String]) async throws -> [SynologyFileItem]
+    let scanCinemaAction: ([CinemaLibraryFolder], [CinemaScannedItem]) async throws -> [CinemaScannedItem]
+    let cinemaArtworkURLAction: (String?) -> URL?
+    let cinemaThumbnailURLAction: (String?) -> URL?
+    let previewCinemaAction: (CinemaScannedItem) -> Void
+    let cinemaPlaybackProgressAction: (String?) -> TimeInterval
+    let cinemaPlaybackDurationAction: (String?) -> TimeInterval
+    let clearCinemaPlaybackProgressAction: (String?) -> Void
+    let cinemaViewingStateRevision: Int
     let backAction: () -> Void
     let favoriteBackAction: () -> Void
     let upAction: () -> Void
@@ -44,6 +52,9 @@ struct FileBrowserView: View {
     @AppStorage("synology.fileDisplayMode") private var displayModeRawValue = FileDisplayMode.list.rawValue
     @State private var fileTransitionEdge: Edge = .trailing
     @State private var favoriteTransitionEdge: Edge = .trailing
+    @State private var cinemaLibraryFolders: [CinemaLibraryFolder] = []
+    @State private var isCinemaSyncing = false
+    @State private var cinemaManualSyncToken = UUID()
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -100,7 +111,22 @@ struct FileBrowserView: View {
                 }
                 .tag(FileBrowserTab.favorites)
 
-                CinemaPlaceholderView()
+                CinemaHomeView(
+                    folders: cinemaLibraryFolders,
+                    serverURLString: serverURLString,
+                    account: account,
+                    isActive: selectedTab == .cinema,
+                    isScanning: $isCinemaSyncing,
+                    manualSyncToken: cinemaManualSyncToken,
+                    scanAction: scanCinemaAction,
+                    artworkURLAction: cinemaArtworkURLAction,
+                    thumbnailURLAction: cinemaThumbnailURLAction,
+                    playAction: previewCinemaAction,
+                    playbackProgressAction: cinemaPlaybackProgressAction,
+                    playbackDurationAction: cinemaPlaybackDurationAction,
+                    clearPlaybackProgressAction: clearCinemaPlaybackProgressAction,
+                    viewingStateRevision: cinemaViewingStateRevision
+                )
                     .tabItem {
                         Label("影院", systemImage: "film")
                     }
@@ -110,6 +136,9 @@ struct FileBrowserView: View {
                     serverURLString: serverURLString,
                     account: account,
                     uploadProgressItems: uploadProgressItems,
+                    cinemaLibraryFolders: $cinemaLibraryFolders,
+                    isCinemaSyncing: isCinemaSyncing,
+                    syncCinemaAction: { cinemaManualSyncToken = UUID() },
                     loadSearchFoldersAction: loadSearchFoldersAction,
                     searchAction: searchAction,
                     previewAction: previewAction,
@@ -197,6 +226,12 @@ struct FileBrowserView: View {
             }
 
         }
+        .task(id: cinemaSettingsIdentity) {
+            cinemaLibraryFolders = CinemaLibrarySettingsStore().load(
+                serverURLString: serverURLString,
+                account: account
+            )
+        }
         .onChange(of: selectedTab) {
             clearSelection()
         }
@@ -246,6 +281,10 @@ struct FileBrowserView: View {
         } message: {
             Text("将删除 \(deleteSelection?.displayName ?? "")，此操作会同步到群晖。")
         }
+    }
+
+    private var cinemaSettingsIdentity: String {
+        "\(serverURLString)|\(account)"
     }
 
     private var navigationTitle: String {
@@ -742,17 +781,13 @@ private struct SelectionActionBar: View {
     }
 }
 
-private struct CinemaPlaceholderView: View {
-    var body: some View {
-        Color(.systemBackground)
-            .ignoresSafeArea()
-    }
-}
-
 private struct SettingsView: View {
     let serverURLString: String
     let account: String
     let uploadProgressItems: [UploadProgressItem]
+    @Binding var cinemaLibraryFolders: [CinemaLibraryFolder]
+    let isCinemaSyncing: Bool
+    let syncCinemaAction: () -> Void
     let loadSearchFoldersAction: (String) async -> [SynologyFileItem]
     let searchAction: (String, [String]) async throws -> [SynologyFileItem]
     let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
@@ -765,6 +800,50 @@ private struct SettingsView: View {
                 Label(serverURLString, systemImage: "server.rack")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("影院") {
+                NavigationLink {
+                    CinemaLibrarySettingsView(
+                        folders: $cinemaLibraryFolders,
+                        serverURLString: serverURLString,
+                        account: account,
+                        loadFoldersAction: loadSearchFoldersAction
+                    )
+                } label: {
+                    HStack {
+                        Label("影院资料库", systemImage: "film.stack")
+                        Spacer()
+                        Text(cinemaLibraryFolders.isEmpty ? "未配置" : "\(cinemaLibraryFolders.count) 个目录")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Button {
+                    syncCinemaAction()
+                } label: {
+                    HStack {
+                        Label(
+                            isCinemaSyncing ? "正在同步影院资料" : "立即同步影院资料",
+                            systemImage: "arrow.triangle.2.circlepath"
+                        )
+                        Spacer()
+                        if isCinemaSyncing {
+                            ProgressView()
+                        }
+                    }
+                }
+                .disabled(isCinemaSyncing || cinemaLibraryFolders.isEmpty)
+
+                if let lastCinemaSyncAt {
+                    LabeledContent(
+                        "上次同步",
+                        value: lastCinemaSyncAt.formatted(date: .abbreviated, time: .shortened)
+                    )
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                }
             }
 
             Section("搜索") {
@@ -802,6 +881,13 @@ private struct SettingsView: View {
             }
         }
         .listStyle(.insetGrouped)
+    }
+
+    private var lastCinemaSyncAt: Date? {
+        CinemaLibraryCacheStore().load(
+            serverURLString: serverURLString,
+            account: account
+        )?.updatedAt
     }
 
     private var uploadProgressSummary: String {

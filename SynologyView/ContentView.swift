@@ -9,6 +9,7 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var model = SynologyViewModel()
+    @State private var cinemaViewingStateRevision = 0
 
     var body: some View {
         @Bindable var model = model
@@ -70,6 +71,28 @@ struct ContentView: View {
                     searchAction: { fileName, paths in
                         try await model.searchFiles(named: fileName, in: paths)
                     },
+                    scanCinemaAction: { libraries, cachedItems in
+                        try await model.scanCinemaLibraries(libraries, cachedItems: cachedItems)
+                    },
+                    cinemaArtworkURLAction: { path in
+                        model.cinemaArtworkURL(for: path)
+                    },
+                    cinemaThumbnailURLAction: { path in
+                        model.cinemaThumbnailURL(for: path)
+                    },
+                    previewCinemaAction: { item in
+                        model.previewCinemaItem(item)
+                    },
+                    cinemaPlaybackProgressAction: { path in
+                        model.playbackProgress(for: path)
+                    },
+                    cinemaPlaybackDurationAction: { path in
+                        model.playbackDuration(for: path)
+                    },
+                    clearCinemaPlaybackProgressAction: { path in
+                        model.clearCinemaPlaybackProgress(for: path)
+                    },
+                    cinemaViewingStateRevision: cinemaViewingStateRevision,
                     backAction: {
                         Task { await model.goBack() }
                     },
@@ -125,6 +148,9 @@ struct ContentView: View {
                     model.clearPlaybackProgress(for: item)
                 }
             )
+            .onDisappear {
+                cinemaViewingStateRevision += 1
+            }
         }
         .animation(.easeInOut(duration: 0.22), value: model.isConnected)
         .task {
