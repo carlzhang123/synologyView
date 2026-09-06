@@ -221,6 +221,7 @@ struct FileBrowserView: View {
                 itemName: selection.displayName,
                 initialPath: initialMoveDestinationPath,
                 loadFoldersAction: loadMoveDestinationFoldersAction,
+                thumbnailURLAction: thumbnailURLAction,
                 cancelAction: {
                     moveSelection = nil
                 },
@@ -544,6 +545,8 @@ private struct FavoriteListView: View {
 }
 
 private struct BrowserListView: View {
+    @State private var thumbnailRefreshToken = UUID()
+
     let emptyTitle: String
     let sectionTitle: String
     let contentID: String
@@ -592,6 +595,7 @@ private struct BrowserListView: View {
                     items: items,
                     isSelectionMode: isSelectionMode,
                     selectedItemIDs: $selectedItemIDs,
+                    thumbnailURLAction: refreshedThumbnailURL,
                     openFolderAction: openFolderAction,
                     previewAction: previewAction,
                     renameRequestAction: renameRequestAction,
@@ -602,7 +606,7 @@ private struct BrowserListView: View {
         }
         .listStyle(.insetGrouped)
         .refreshable {
-            await refreshAction()
+            await refreshContent()
         }
     }
 
@@ -616,7 +620,7 @@ private struct BrowserListView: View {
                     ForEach(items) { item in
                         FileThumbnailTile(
                             item: item,
-                            thumbnailURL: thumbnailURLAction(item),
+                            thumbnailURL: refreshedThumbnailURL(for: item),
                             isSelected: selectedItemIDs.contains(item.id),
                             isSelectionMode: isSelectionMode,
                             action: {
@@ -633,9 +637,26 @@ private struct BrowserListView: View {
             }
         }
         .refreshable {
-            await refreshAction()
+            await refreshContent()
         }
         .background(Color(.systemGroupedBackground))
+    }
+
+    private func refreshContent() async {
+        await refreshAction()
+        thumbnailRefreshToken = UUID()
+    }
+
+    private func refreshedThumbnailURL(for item: SynologyFileItem) -> URL? {
+        guard let url = thumbnailURLAction(item),
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return thumbnailURLAction(item)
+        }
+
+        var queryItems = components.queryItems ?? []
+        queryItems.append(URLQueryItem(name: "thumbnailRefresh", value: thumbnailRefreshToken.uuidString))
+        components.queryItems = queryItems
+        return components.url
     }
 
     private var gridColumns: [GridItem] {
@@ -677,7 +698,7 @@ private struct BrowserListView: View {
         Button {
             moveRequestAction(item)
         } label: {
-            Label("移动到", systemImage: "folder.badge.arrow.right")
+            Label("移动到", systemImage: "folder")
         }
 
         Button(role: .destructive) {
@@ -704,7 +725,7 @@ private struct SelectionActionBar: View {
             Button {
                 moveAction()
             } label: {
-                Label("移动", systemImage: "folder.badge.arrow.right")
+                Label("移动", systemImage: "folder")
             }
             .disabled(selectedCount == 0)
 
@@ -907,6 +928,7 @@ private struct MoveDestinationPickerView: View {
     let itemName: String
     let initialPath: String
     let loadFoldersAction: (String) async -> [SynologyFileItem]
+    let thumbnailURLAction: (SynologyFileItem) -> URL?
     let cancelAction: () -> Void
     let moveAction: (String) -> Void
     @State private var currentPath: String
@@ -918,6 +940,7 @@ private struct MoveDestinationPickerView: View {
         itemName: String,
         initialPath: String,
         loadFoldersAction: @escaping (String) async -> [SynologyFileItem],
+        thumbnailURLAction: @escaping (SynologyFileItem) -> URL?,
         cancelAction: @escaping () -> Void,
         moveAction: @escaping (String) -> Void
     ) {
@@ -925,6 +948,7 @@ private struct MoveDestinationPickerView: View {
         self.itemName = itemName
         self.initialPath = initialPath
         self.loadFoldersAction = loadFoldersAction
+        self.thumbnailURLAction = thumbnailURLAction
         self.cancelAction = cancelAction
         self.moveAction = moveAction
         _currentPath = State(initialValue: initialPath)
@@ -949,7 +973,7 @@ private struct MoveDestinationPickerView: View {
                     Button {
                         moveAction(currentPath)
                     } label: {
-                        Label("移到这里", systemImage: "folder.badge.arrow.right")
+                        Label("移到这里", systemImage: "folder")
                             .font(.headline)
                     }
                     .disabled(currentPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -961,27 +985,22 @@ private struct MoveDestinationPickerView: View {
                             Spacer()
                         }
                     } else if folders.isEmpty {
-                        ContentUnavailableView("没有下级文件夹", systemImage: "folder")
+                        ContentUnavailableView("此文件夹为空", systemImage: "folder")
                     } else {
-                        ForEach(folders) { folder in
-                            Button {
-                                currentPath = folder.path
-                                Task {
-                                    await loadFolders()
+                        ForEach(folders) { item in
+                            if item.isDirectory {
+                                Button {
+                                    currentPath = item.path
+                                    Task {
+                                        await loadFolders()
+                                    }
+                                } label: {
+                                    destinationRow(for: item)
                                 }
-                            } label: {
-                                FileRow(
-                                    name: folder.name,
-                                    detail: folder.detail,
-                                    isDirectory: true,
-                                    isVideo: false,
-                                    isImage: false,
-                                    isPreviewable: false,
-                                    isSelected: false,
-                                    isSelectionMode: false
-                                )
+                                .buttonStyle(.plain)
+                            } else {
+                                destinationRow(for: item)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -1023,6 +1042,22 @@ private struct MoveDestinationPickerView: View {
         }
     }
 
+    private func destinationRow(for item: SynologyFileItem) -> some View {
+        FileRow(
+            name: item.name,
+            detail: item.detail,
+            isDirectory: item.isDirectory,
+            isVideo: item.isVideo,
+            isImage: item.isImage,
+            isPreviewable: item.isPreviewable,
+            thumbnailURL: thumbnailURLAction(item),
+            isSelected: false,
+            isSelectionMode: false,
+            showsAccessory: item.isDirectory
+        )
+        .contentShape(Rectangle())
+    }
+
     private var destinationTitle: String {
         let trimmedPath = currentPath.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedPath.isEmpty ? "选择共享文件夹" : URL(fileURLWithPath: trimmedPath).lastPathComponent
@@ -1050,6 +1085,7 @@ private struct FileListSection: View {
     let items: [SynologyFileItem]
     let isSelectionMode: Bool
     @Binding var selectedItemIDs: Set<String>
+    let thumbnailURLAction: (SynologyFileItem) -> URL?
     let openFolderAction: (SynologyFileItem) -> Void
     let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
     let renameRequestAction: (SynologyFileItem) -> Void
@@ -1075,8 +1111,10 @@ private struct FileListSection: View {
                         isVideo: item.isVideo,
                         isImage: item.isImage,
                         isPreviewable: item.isPreviewable,
+                        thumbnailURL: thumbnailURLAction(item),
                         isSelected: selectedItemIDs.contains(item.id),
-                        isSelectionMode: isSelectionMode
+                        isSelectionMode: isSelectionMode,
+                        showsAccessory: true
                     )
                     .contentShape(Rectangle())
                 }
@@ -1091,7 +1129,7 @@ private struct FileListSection: View {
                     Button {
                         moveRequestAction(item)
                     } label: {
-                        Label("移动", systemImage: "folder.badge.arrow.right")
+                        Label("移动", systemImage: "folder")
                     }
                     .tint(.indigo)
 
@@ -1112,7 +1150,7 @@ private struct FileListSection: View {
                     Button {
                         moveRequestAction(item)
                     } label: {
-                        Label("移动到", systemImage: "folder.badge.arrow.right")
+                        Label("移动到", systemImage: "folder")
                     }
 
                     Button(role: .destructive) {
@@ -1265,8 +1303,10 @@ private struct FileRow: View {
     let isVideo: Bool
     let isImage: Bool
     let isPreviewable: Bool
+    let thumbnailURL: URL?
     let isSelected: Bool
     let isSelectionMode: Bool
+    let showsAccessory: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1276,9 +1316,9 @@ private struct FileRow: View {
                     .frame(width: 24)
             }
 
-            Image(systemName: iconName)
-                .foregroundStyle(iconColor)
-                .frame(width: 24)
+            thumbnailContent
+                .frame(width: 44, height: 44)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(name)
@@ -1294,13 +1334,44 @@ private struct FileRow: View {
 
             Spacer()
 
-            if !isSelectionMode, isDirectory || isPreviewable {
+            if !isSelectionMode, showsAccessory, isDirectory || isPreviewable {
                 Image(systemName: isDirectory ? "chevron.right" : "play.circle")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.tertiary)
             }
         }
         .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private var thumbnailContent: some View {
+        if let thumbnailURL, isPreviewable {
+            AsyncImage(url: thumbnailURL, transaction: Transaction(animation: .easeInOut(duration: 0.18))) { phase in
+                switch phase {
+                case let .success(image):
+                    image
+                        .resizable()
+                        .scaledToFill()
+                case .empty:
+                    thumbnailPlaceholder
+                        .overlay { ProgressView() }
+                case .failure:
+                    thumbnailPlaceholder
+                @unknown default:
+                    thumbnailPlaceholder
+                }
+            }
+        } else {
+            thumbnailPlaceholder
+        }
+    }
+
+    private var thumbnailPlaceholder: some View {
+        ZStack {
+            Color(.tertiarySystemGroupedBackground)
+            Image(systemName: iconName)
+                .foregroundStyle(iconColor)
+        }
     }
 
     private var iconName: String {

@@ -159,10 +159,20 @@ struct SynologyClient {
         var results: [SynologyFileItem] = []
 
         for folderPath in folderPaths {
-            let taskID = try await startSearch(api: api, fileName: fileName, folderPath: folderPath)
-            let taskResults = try await waitForSearchResults(api: api, taskID: taskID)
-            results.append(contentsOf: taskResults)
-            try? await stopSearch(api: api, taskID: taskID)
+            for attempt in 0..<3 {
+                let taskID = try await startSearch(api: api, fileName: fileName, folderPath: folderPath)
+                let taskResults = try await waitForSearchResults(api: api, taskID: taskID)
+                try? await stopSearch(api: api, taskID: taskID)
+
+                if !taskResults.isEmpty {
+                    results.append(contentsOf: taskResults)
+                    break
+                }
+
+                if attempt < 2 {
+                    try await Task.sleep(for: .milliseconds(350))
+                }
+            }
         }
 
         return Dictionary(grouping: results, by: \.path)

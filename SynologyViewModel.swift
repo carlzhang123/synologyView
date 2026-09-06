@@ -415,7 +415,7 @@ final class SynologyViewModel {
     }
 
     func loadSearchFolders(at path: String) async -> [SynologyFileItem] {
-        await loadMoveDestinationFolders(at: path)
+        await loadMoveDestinationFolders(at: path).filter(\.isDirectory)
     }
 
     func rename(_ item: SynologyFileItem, to newName: String) async {
@@ -627,7 +627,7 @@ final class SynologyViewModel {
                 items = try await client.loadFolder(api: fileStationListAPI, path: normalizedFolderPath)
             }
 
-            return items.filter(\.isDirectory)
+            return items
         } catch {
             statusMessage = error.localizedDescription
             return []
