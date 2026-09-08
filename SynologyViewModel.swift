@@ -11,6 +11,11 @@ final class SynologyViewModel {
     var pendingOTPCode = ""
     var isOTPDialogPresented = false
     var trustsThisDevice = true
+    var allowsInsecureConnections = false {
+        didSet {
+            settingsStore.saveAllowsInsecureConnections(allowsInsecureConnections)
+        }
+    }
     var statusMessage = "尚未连接"
     var isLoading = false
     var discoveredAPIs: [SynologyAPIInfo] = []
@@ -48,6 +53,7 @@ final class SynologyViewModel {
         serverURLString = settings.lastServer
         savedServers = settings.savedServers
         account = settings.lastAccount
+        allowsInsecureConnections = settings.allowsInsecureConnections
         password = settingsStore.loadPassword(serverURLString: settings.lastServer, account: settings.lastAccount) ?? ""
         lastMoveDestinationPath = fileOperationSettingsStore.loadLastMoveDestinationPath()
     }
@@ -453,7 +459,8 @@ final class SynologyViewModel {
             path: videoPath,
             isDirectory: false,
             size: nil,
-            modifiedTime: nil
+            modifiedTime: nil,
+            createdTime: item.sourceCreatedAt
         )
         preview(file)
     }
@@ -669,6 +676,11 @@ final class SynologyViewModel {
         errorMessage: String? = nil
     ) {
         guard let index = uploadProgressItems.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+
+        if status == .uploading,
+           uploadProgressItems[index].status == .finished || uploadProgressItems[index].status == .failed {
             return
         }
 

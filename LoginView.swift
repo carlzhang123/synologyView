@@ -8,6 +8,7 @@ struct LoginView: View {
     @Binding var isOTPDialogPresented: Bool
     @Binding var otpCode: String
     @Binding var trustsThisDevice: Bool
+    @Binding var allowsInsecureConnections: Bool
     let isLoading: Bool
     let statusMessage: String
     let selectServerAction: (String) -> Void
@@ -47,6 +48,16 @@ struct LoginView: View {
 
                     Toggle("信任此设备", isOn: $trustsThisDevice)
                         .font(.subheadline)
+
+                    Toggle("允许不安全访问", isOn: $allowsInsecureConnections)
+                        .font(.subheadline)
+                        .tint(.orange)
+
+                    if allowsInsecureConnections {
+                        Label("仅建议在证书过期时临时开启，连接可能被窃听或篡改。", systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
 
                     Button {
                         loginAction()

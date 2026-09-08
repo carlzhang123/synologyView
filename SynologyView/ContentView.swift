@@ -26,6 +26,7 @@ struct ContentView: View {
                     favoriteBrowserItems: model.favoriteBrowserItems,
                     isLoading: model.isLoading,
                     uploadProgressItems: model.uploadProgressItems,
+                    allowsInsecureConnections: $model.allowsInsecureConnections,
                     canGoUp: model.canGoUp,
                     canGoBack: model.canGoBack,
                     canGoFavoriteBack: model.canGoFavoriteBack,
@@ -120,6 +121,7 @@ struct ContentView: View {
                     isOTPDialogPresented: $model.isOTPDialogPresented,
                     otpCode: $model.pendingOTPCode,
                     trustsThisDevice: $model.trustsThisDevice,
+                    allowsInsecureConnections: $model.allowsInsecureConnections,
                     isLoading: model.isLoading,
                     statusMessage: model.statusMessage,
                     selectServerAction: { server in

@@ -10,6 +10,7 @@ struct FileBrowserView: View {
     let favoriteBrowserItems: [SynologyFileItem]
     let isLoading: Bool
     let uploadProgressItems: [UploadProgressItem]
+    @Binding var allowsInsecureConnections: Bool
     let canGoUp: Bool
     let canGoBack: Bool
     let canGoFavoriteBack: Bool
@@ -136,6 +137,7 @@ struct FileBrowserView: View {
                     serverURLString: serverURLString,
                     account: account,
                     uploadProgressItems: uploadProgressItems,
+                    allowsInsecureConnections: $allowsInsecureConnections,
                     cinemaLibraryFolders: $cinemaLibraryFolders,
                     isCinemaSyncing: isCinemaSyncing,
                     syncCinemaAction: { cinemaManualSyncToken = UUID() },
@@ -785,6 +787,7 @@ private struct SettingsView: View {
     let serverURLString: String
     let account: String
     let uploadProgressItems: [UploadProgressItem]
+    @Binding var allowsInsecureConnections: Bool
     @Binding var cinemaLibraryFolders: [CinemaLibraryFolder]
     let isCinemaSyncing: Bool
     let syncCinemaAction: () -> Void
@@ -800,6 +803,15 @@ private struct SettingsView: View {
                 Label(serverURLString, systemImage: "server.rack")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("连接安全") {
+                Toggle("允许不安全访问", isOn: $allowsInsecureConnections)
+                    .tint(.orange)
+
+                Text("仅在服务器证书过期等情况下临时开启。开启后，HTTPS 连接可能被窃听或篡改。")
+                    .font(.footnote)
+                    .foregroundStyle(allowsInsecureConnections ? .orange : .secondary)
             }
 
             Section("影院") {
@@ -837,10 +849,13 @@ private struct SettingsView: View {
                 .disabled(isCinemaSyncing || cinemaLibraryFolders.isEmpty)
 
                 if let lastCinemaSyncAt {
-                    LabeledContent(
-                        "上次同步",
-                        value: lastCinemaSyncAt.formatted(date: .abbreviated, time: .shortened)
-                    )
+                    LabeledContent("上次同步") {
+                        Text(
+                            lastCinemaSyncAt,
+                            format: .dateTime.year().month().day().hour().minute()
+                        )
+                        .environment(\.locale, Locale(identifier: "zh-Hans-CN"))
+                    }
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 }
@@ -1206,11 +1221,12 @@ private struct FileListSection: View {
                 }
                 .buttonStyle(.plain)
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(role: .destructive) {
+                    Button {
                         deleteRequestAction(item)
                     } label: {
                         Label("删除", systemImage: "trash")
                     }
+                    .tint(.red)
 
                     Button {
                         moveRequestAction(item)

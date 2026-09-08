@@ -5,6 +5,7 @@ struct SynologyLoginSettings: Equatable {
     let lastServer: String
     let lastAccount: String
     let savedServers: [String]
+    let allowsInsecureConnections: Bool
 }
 
 struct SynologyLoginSettingsStore {
@@ -14,13 +15,19 @@ struct SynologyLoginSettingsStore {
     private let lastServerKey = "synology.lastServerURL"
     private let lastAccountKey = "synology.lastAccount"
     private let savedServersKey = "synology.savedServers"
+    static let allowsInsecureConnectionsKey = "synology.allowsInsecureConnections"
 
     func load() -> SynologyLoginSettings {
         SynologyLoginSettings(
             lastServer: defaults.string(forKey: lastServerKey) ?? "",
             lastAccount: defaults.string(forKey: lastAccountKey) ?? "",
-            savedServers: defaults.stringArray(forKey: savedServersKey) ?? []
+            savedServers: defaults.stringArray(forKey: savedServersKey) ?? [],
+            allowsInsecureConnections: defaults.bool(forKey: Self.allowsInsecureConnectionsKey)
         )
+    }
+
+    func saveAllowsInsecureConnections(_ isAllowed: Bool) {
+        defaults.set(isAllowed, forKey: Self.allowsInsecureConnectionsKey)
     }
 
     func save(serverURLString: String, account: String, password: String, deviceID: String?) {

@@ -3,6 +3,7 @@ import Foundation
 struct SynologyClient {
     let webAPIBaseURL: URL
     let sessionID: String?
+    private let networkSession: URLSession
 
     init(serverURLString: String, sessionID: String? = nil) throws {
         guard let inputURL = URL(string: serverURLString) else {
@@ -11,6 +12,7 @@ struct SynologyClient {
 
         self.webAPIBaseURL = try Self.webAPIBaseURL(from: inputURL)
         self.sessionID = sessionID
+        self.networkSession = SynologyNetworkSession.make()
     }
 
     func discoverAPIs() async throws -> [SynologyAPIInfo] {
@@ -108,25 +110,39 @@ struct SynologyClient {
     }
 
     func loadFolder(api: SynologyAPIInfo, path: String) async throws -> [SynologyFileItem] {
-        let url = try makeAPIURL(
-            api: api,
-            method: "list",
-            version: api.maxVersion,
-            parameters: [
-                URLQueryItem(name: "folder_path", value: path),
-                URLQueryItem(name: "limit", value: "500"),
-                URLQueryItem(name: "offset", value: "0"),
-                URLQueryItem(name: "additional", value: "[\"real_path\",\"size\",\"owner\",\"time\",\"type\"]")
-            ],
-            includeSession: true
-        )
+        let pageSize = 500
+        var offset = 0
+        var allFiles: [SynologyFilePayload] = []
 
-        let response: SynologyFileListResponse = try await request(url)
-        guard response.success, let files = response.data?.files else {
-            throw SynologyClientError.apiError(response.error?.code, apiName: api.name)
+        while true {
+            try Task.checkCancellation()
+            let url = try makeAPIURL(
+                api: api,
+                method: "list",
+                version: api.maxVersion,
+                parameters: [
+                    URLQueryItem(name: "folder_path", value: path),
+                    URLQueryItem(name: "limit", value: "\(pageSize)"),
+                    URLQueryItem(name: "offset", value: "\(offset)"),
+                    URLQueryItem(name: "additional", value: "[\"real_path\",\"size\",\"owner\",\"time\",\"type\"]")
+                ],
+                includeSession: true
+            )
+
+            let response: SynologyFileListResponse = try await request(url)
+            guard response.success, let data = response.data, let files = data.files else {
+                throw SynologyClientError.apiError(response.error?.code, apiName: api.name)
+            }
+
+            allFiles.append(contentsOf: files)
+            offset += files.count
+
+            if files.isEmpty || offset >= (data.total ?? Int.max) || (data.total == nil && files.count < pageSize) {
+                break
+            }
         }
 
-        return files.map(\.fileItem).sortedByKindAndName()
+        return allFiles.map(\.fileItem).sortedByKindAndName()
     }
 
     func loadFavorites(api: SynologyAPIInfo) async throws -> [SynologyFileItem] {
@@ -345,7 +361,8 @@ struct SynologyClient {
         let (data, response) = try await UploadProgressDelegate.upload(
             request: request,
             fileURL: multipartURL,
-            progressHandler: progressHandler
+            progressHandler: progressHandler,
+            allowsInsecureConnections: SynologyNetworkSession.allowsInsecureConnections
         )
         guard let httpResponse = response as? HTTPURLResponse,
               200..<300 ~= httpResponse.statusCode else {
@@ -402,7 +419,7 @@ struct SynologyClient {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await networkSession.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               200..<300 ~= httpResponse.statusCode else {
             throw SynologyClientError.httpError((response as? HTTPURLResponse)?.statusCode)
@@ -616,7 +633,7 @@ struct SynologyClient {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await networkSession.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               200..<300 ~= httpResponse.statusCode else {
             throw SynologyClientError.httpError((response as? HTTPURLResponse)?.statusCode)
@@ -630,21 +647,64 @@ struct SynologyClient {
     }
 }
 
+enum SynologyNetworkSession {
+    static var allowsInsecureConnections: Bool {
+        UserDefaults.standard.bool(forKey: SynologyLoginSettingsStore.allowsInsecureConnectionsKey)
+    }
+
+    static func make() -> URLSession {
+        URLSession(
+            configuration: .default,
+            delegate: ServerTrustDelegate(allowsInsecureConnections: allowsInsecureConnections),
+            delegateQueue: nil
+        )
+    }
+}
+
+private final class ServerTrustDelegate: NSObject, URLSessionDelegate {
+    private let allowsInsecureConnections: Bool
+
+    init(allowsInsecureConnections: Bool) {
+        self.allowsInsecureConnections = allowsInsecureConnections
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard allowsInsecureConnections,
+              challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let serverTrust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
+    }
+}
+
 private final class UploadProgressDelegate: NSObject, URLSessionDataDelegate {
     private let progressHandler: (Double) -> Void
     private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
     private var responseData = Data()
+    private let allowsInsecureConnections: Bool
 
-    private init(progressHandler: @escaping (Double) -> Void) {
+    private init(progressHandler: @escaping (Double) -> Void, allowsInsecureConnections: Bool) {
         self.progressHandler = progressHandler
+        self.allowsInsecureConnections = allowsInsecureConnections
     }
 
     static func upload(
         request: URLRequest,
         fileURL: URL,
-        progressHandler: @escaping (Double) -> Void
+        progressHandler: @escaping (Double) -> Void,
+        allowsInsecureConnections: Bool
     ) async throws -> (Data, URLResponse) {
-        let delegate = UploadProgressDelegate(progressHandler: progressHandler)
+        let delegate = UploadProgressDelegate(
+            progressHandler: progressHandler,
+            allowsInsecureConnections: allowsInsecureConnections
+        )
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 delegate.continuation = continuation
@@ -655,6 +715,21 @@ private final class UploadProgressDelegate: NSObject, URLSessionDataDelegate {
         } onCancel: {
             progressHandler(0)
         }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard allowsInsecureConnections,
+              challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let serverTrust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
     }
 
     func urlSession(

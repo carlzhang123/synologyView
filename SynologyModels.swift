@@ -75,6 +75,7 @@ struct SynologyFileItem: Identifiable, Equatable {
     let isDirectory: Bool
     let size: Int64?
     let modifiedTime: Date?
+    let createdTime: Date?
 
     var detail: String {
         var parts: [String] = []
@@ -163,6 +164,7 @@ struct SynologyFileListData: Decodable {
     let shares: [SynologyFilePayload]?
     let files: [SynologyFilePayload]?
     let finished: Bool?
+    let total: Int?
 }
 
 struct SynologyFavoriteListResponse: Decodable {
@@ -189,7 +191,8 @@ struct SynologyFavoritePayload: Decodable {
             path: path,
             isDirectory: isdir,
             size: additional?.size,
-            modifiedTime: additional?.time?.modifiedDate
+            modifiedTime: additional?.time?.modifiedDate,
+            createdTime: additional?.time?.createdDate
         )
     }
 }
@@ -223,7 +226,8 @@ struct SynologyFilePayload: Decodable {
             path: path,
             isDirectory: isdir,
             size: additional?.size,
-            modifiedTime: additional?.time?.modifiedDate
+            modifiedTime: additional?.time?.modifiedDate,
+            createdTime: additional?.time?.createdDate
         )
     }
 }
@@ -235,10 +239,16 @@ struct SynologyFileAdditionalPayload: Decodable {
 
 struct SynologyFileTimePayload: Decodable {
     let mtime: Int?
+    let crtime: Int?
 
     var modifiedDate: Date? {
         guard let mtime else { return nil }
         return Date(timeIntervalSince1970: TimeInterval(mtime))
+    }
+
+    var createdDate: Date? {
+        guard let crtime else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(crtime))
     }
 }
 

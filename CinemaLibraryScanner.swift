@@ -10,6 +10,7 @@ struct CinemaScannedItem: Codable, Identifiable, Equatable {
     let fanartPath: String?
     let metadata: KodiMetadata?
     let sourceModifiedAt: Date?
+    let sourceCreatedAt: Date?
     let sourceSignature: String?
 
     var deduplicationKey: String {
@@ -140,6 +141,7 @@ struct CinemaLibraryScanner {
                     fanartPath: nil,
                     metadata: nil,
                     sourceModifiedAt: $0.modifiedTime,
+                    sourceCreatedAt: $0.createdTime,
                     sourceSignature: signature(for: [$0])
                 )
             }
@@ -162,6 +164,7 @@ struct CinemaLibraryScanner {
             if let cachedItem = cachedItemsByID[nfoFile.path],
                cachedItem.libraryKind == kind,
                cachedItem.sourceSignature == currentSignature,
+               (cachedItem.metadata?.mediaType == .tvShow || cachedItem.sourceCreatedAt != nil),
                cachedItem.shouldAppearInLibrary {
                 results.append(cachedItem)
                 continue
@@ -184,6 +187,7 @@ struct CinemaLibraryScanner {
                     fanartPath: artworkPath(named: "fanart", baseName: baseName, in: imageFiles),
                     metadata: metadata,
                     sourceModifiedAt: sourceModifiedAt(for: nfoFile, video: matchingVideo, images: imageFiles),
+                    sourceCreatedAt: matchingVideo?.createdTime,
                     sourceSignature: currentSignature
                 )
             )
@@ -205,7 +209,7 @@ struct CinemaLibraryScanner {
     private func signature(for files: [SynologyFileItem]) -> String {
         files
             .map {
-                "\($0.path)|\($0.size ?? -1)|\($0.modifiedTime?.timeIntervalSince1970 ?? -1)"
+                "\($0.path)|\($0.size ?? -1)|\($0.modifiedTime?.timeIntervalSince1970 ?? -1)|\($0.createdTime?.timeIntervalSince1970 ?? -1)"
             }
             .sorted()
             .joined(separator: "\n")

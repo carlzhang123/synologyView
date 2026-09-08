@@ -133,6 +133,26 @@ struct CinemaHomeView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            NavigationLink {
+                CinemaRecentVideosView(
+                    items: recentVideoItems,
+                    posterURLAction: mediaPosterURL,
+                    playAction: playAction,
+                    stateAction: viewingState,
+                    progressAction: playbackProgressAction,
+                    durationAction: playbackDurationAction,
+                    favoriteAction: toggleFavorite,
+                    watchedAction: toggleWatched
+                )
+            } label: {
+                HStack {
+                    Label("最近新增", systemImage: "clock.fill")
+                    Spacer()
+                    Text("\(recentVideoItems.count)")
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -286,6 +306,17 @@ struct CinemaHomeView: View {
 
     private var favoriteItems: [CinemaScannedItem] {
         items.filter { viewingState(for: $0).isFavorite }
+    }
+
+    private var recentVideoItems: [CinemaScannedItem] {
+        Array(
+            items
+                .filter { $0.videoPath != nil && $0.sourceCreatedAt != nil }
+                .sorted {
+                    ($0.sourceCreatedAt ?? .distantPast) > ($1.sourceCreatedAt ?? .distantPast)
+                }
+                .prefix(100)
+        )
     }
 
     private var tvShowGroups: [TVShowGroup] {
@@ -812,6 +843,98 @@ private struct CinemaFavoritesView: View {
             progress: progressAction(item.videoPath),
             duration: durationAction(item.videoPath)
         )
+    }
+}
+
+private struct CinemaRecentVideosView: View {
+    let items: [CinemaScannedItem]
+    let posterURLAction: (CinemaScannedItem) -> URL?
+    let playAction: (CinemaScannedItem) -> Void
+    let stateAction: (CinemaScannedItem) -> CinemaViewingState
+    let progressAction: (String?) -> TimeInterval
+    let durationAction: (String?) -> TimeInterval
+    let favoriteAction: (CinemaScannedItem) -> Void
+    let watchedAction: (CinemaScannedItem) -> Void
+
+    var body: some View {
+        List {
+            if items.isEmpty {
+                ContentUnavailableView(
+                    "没有最近新增的视频",
+                    systemImage: "clock.fill",
+                    description: Text("同步影院资料库后，将按视频文件创建时间显示最近 100 个。")
+                )
+            } else {
+                ForEach(items) { item in
+                    Button {
+                        playAction(item)
+                    } label: {
+                        CinemaRecentVideoRow(
+                            item: item,
+                            posterURL: posterURLAction(item),
+                            viewingState: stateAction(item),
+                            progress: progressAction(item.videoPath),
+                            duration: durationAction(item.videoPath)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button {
+                            watchedAction(item)
+                        } label: {
+                            Label(
+                                stateAction(item).isWatched ? "未观看" : "已观看",
+                                systemImage: stateAction(item).isWatched ? "eye.slash" : "eye"
+                            )
+                        }
+                        .tint(.green)
+
+                        Button {
+                            favoriteAction(item)
+                        } label: {
+                            Label(
+                                stateAction(item).isFavorite ? "取消收藏" : "收藏",
+                                systemImage: stateAction(item).isFavorite ? "star.slash" : "star"
+                            )
+                        }
+                        .tint(.orange)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("最近新增")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct CinemaRecentVideoRow: View {
+    let item: CinemaScannedItem
+    let posterURL: URL?
+    let viewingState: CinemaViewingState
+    let progress: TimeInterval
+    let duration: TimeInterval
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            CinemaMediaRow(
+                item: item,
+                posterURL: posterURL,
+                viewingState: viewingState,
+                progress: progress,
+                duration: duration
+            )
+
+            if let sourceCreatedAt = item.sourceCreatedAt {
+                Text(
+                    sourceCreatedAt,
+                    format: .dateTime.year().month().day().hour().minute()
+                )
+                .environment(\.locale, Locale(identifier: "zh-Hans-CN"))
+                .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

@@ -70,6 +70,7 @@ private struct VideoPreview: View {
     @State private var mediaMetadataTask: Task<Void, Never>?
     @State private var vlcStartupWatchdogTask: Task<Void, Never>?
     @State private var localPlaybackClockTask: Task<Void, Never>?
+    @State private var audioInterruptionTask: Task<Void, Never>?
     @State private var localPlaybackClockAnchorDate = Date.distantPast
     @State private var localPlaybackClockAnchorTime: TimeInterval = 0
     @State private var hasTrustedDuration = false
@@ -181,6 +182,10 @@ private struct VideoPreview: View {
             }
         }
         .statusBarHidden()
+        .onAppear {
+            configureVideoAudioSession()
+            startAudioInterruptionObservation()
+        }
         .task {
             startInitialPlayback()
             await observeNativePlaybackEnd()
@@ -363,6 +368,8 @@ private struct VideoPreview: View {
         mediaMetadataTask = nil
         vlcStartupWatchdogTask?.cancel()
         vlcStartupWatchdogTask = nil
+        audioInterruptionTask?.cancel()
+        audioInterruptionTask = nil
         stopLocalPlaybackClock()
         clearSeekProtection()
         removeProgressObserver()
@@ -375,6 +382,62 @@ private struct VideoPreview: View {
         player = nil
         usesVLCFallback = false
         isPlaying = false
+    }
+
+    private func configureVideoAudioSession() {
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .moviePlayback)
+            try audioSession.setActive(true)
+        } catch {
+            // Interruption handling still works when another app temporarily owns the audio session.
+        }
+    }
+
+    private func startAudioInterruptionObservation() {
+        audioInterruptionTask?.cancel()
+        audioInterruptionTask = Task { @MainActor in
+            let notifications = NotificationCenter.default.notifications(
+                named: AVAudioSession.interruptionNotification,
+                object: AVAudioSession.sharedInstance()
+            )
+
+            for await notification in notifications {
+                handleAudioSessionInterruption(notification)
+            }
+        }
+    }
+
+    private func handleAudioSessionInterruption(_ notification: Notification) {
+        guard let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: rawType) else {
+            return
+        }
+
+        switch type {
+        case .began:
+            pauseForAudioInterruption()
+        case .ended:
+            configureVideoAudioSession()
+        @unknown default:
+            break
+        }
+    }
+
+    private func pauseForAudioInterruption() {
+        guard isPlaying || player?.timeControlStatus == .playing else {
+            return
+        }
+
+        if usesVLCFallback {
+            vlcController.pause()
+            syncLocalPlaybackClock(to: currentTime)
+        } else {
+            player?.pause()
+        }
+
+        isPlaying = false
+        showsControls = true
     }
 
     private func observeStatus(for item: AVPlayerItem, allowsURLFallback: Bool, allowsLocalFallback: Bool) {
@@ -1140,7 +1203,7 @@ private struct VideoPreview: View {
         var request = URLRequest(url: playbackURL)
         request.timeoutInterval = 15
         request.setValue("bytes=0-\(byteCount - 1)", forHTTPHeaderField: "Range")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await SynologyNetworkSession.make().data(for: request)
         return MediaMetadataProbeChunk(data: data, responseDescription: debugHTTPResponseDescription(response))
     }
 
@@ -1165,7 +1228,7 @@ private struct VideoPreview: View {
         var request = URLRequest(url: playbackURL)
         request.timeoutInterval = 15
         request.setValue("bytes=-\(byteCount)", forHTTPHeaderField: "Range")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await SynologyNetworkSession.make().data(for: request)
         return MediaMetadataProbeChunk(data: data, responseDescription: debugHTTPResponseDescription(response))
     }
 
