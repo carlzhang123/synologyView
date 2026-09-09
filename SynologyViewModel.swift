@@ -415,24 +415,9 @@ final class SynologyViewModel {
     func scanCinemaLibraries(
         _ libraries: [CinemaLibraryFolder],
         cachedItems: [CinemaScannedItem]
-    ) async throws -> [CinemaScannedItem] {
-        guard let sessionID else {
-            throw SynologyClientError.notAuthenticated
-        }
-        guard let fileStationListAPI else {
-            throw SynologyClientError.missingAPI("SYNO.FileStation.List")
-        }
-
-        let client = try SynologyClient(serverURLString: serverURLString, sessionID: sessionID)
-        let scanner = CinemaLibraryScanner(
-            loadFolder: { path in
-                try await client.loadFolder(api: fileStationListAPI, path: path)
-            },
-            loadData: { path in
-                try await client.downloadData(api: self.fileStationDownloadAPI, for: path)
-            }
-        )
-        return try await scanner.scan(libraries, cachedItems: cachedItems)
+    ) async throws -> CinemaIndexSnapshot {
+        let settings = CinemaIndexServiceSettingsStore().load()
+        return try await CinemaIndexServiceClient(settings: settings).loadSnapshot()
     }
 
     func cinemaThumbnailURL(for path: String?) -> URL? {

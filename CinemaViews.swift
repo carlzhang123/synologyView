@@ -25,7 +25,7 @@ struct CinemaHomeView: View {
     let isActive: Bool
     @Binding var isScanning: Bool
     let manualSyncToken: UUID
-    let scanAction: ([CinemaLibraryFolder], [CinemaScannedItem]) async throws -> [CinemaScannedItem]
+    let scanAction: ([CinemaLibraryFolder], [CinemaScannedItem]) async throws -> CinemaIndexSnapshot
     let artworkURLAction: (String?) -> URL?
     let thumbnailURLAction: (String?) -> URL?
     let playAction: (CinemaScannedItem) -> Void
@@ -36,12 +36,13 @@ struct CinemaHomeView: View {
 
     @State private var selectedPage = CinemaPage.movies
     @State private var items: [CinemaScannedItem] = []
+    @State private var indexedFolders: [CinemaLibraryFolder] = []
     @State private var viewingStates: [String: CinemaViewingState] = [:]
     @State private var errorMessage: String?
 
     var body: some View {
         List {
-            if !folders.isEmpty {
+            if !activeFolders.isEmpty {
                 Section {
                     Picker("影院分类", selection: $selectedPage) {
                         ForEach(CinemaPage.allCases) { page in
@@ -80,7 +81,7 @@ struct CinemaHomeView: View {
 
     @ViewBuilder
     private var cinemaContent: some View {
-        if folders.isEmpty {
+        if activeFolders.isEmpty {
             ContentUnavailableView(
                 "尚未配置影院资料库",
                 systemImage: "film.stack",
@@ -168,6 +169,7 @@ struct CinemaHomeView: View {
                         TVShowDetailView(
                             group: group,
                             artworkURLAction: artworkURLAction,
+                            thumbnailURLAction: thumbnailURLAction,
                             playAction: playAction,
                             stateAction: viewingState,
                             progressAction: playbackProgressAction,
@@ -181,7 +183,8 @@ struct CinemaHomeView: View {
                     } label: {
                         CinemaMediaRow(
                             item: group.show,
-                            posterURL: artworkURLAction(group.show.posterPath),
+                            posterURL: artworkURLAction(group.show.posterPath)
+                                ?? thumbnailURLAction(group.episodes.first?.videoPath),
                             viewingState: tvShowViewingState(for: group),
                             progress: tvShowIsInProgress(group) ? 2 : 0,
                             duration: 0
@@ -194,7 +197,7 @@ struct CinemaHomeView: View {
 
     @ViewBuilder
     private var personalVideoContent: some View {
-        let roots = folders.filter { $0.kind == .personalVideos }
+        let roots = activeFolders.filter { $0.kind == .personalVideos }
         if roots.isEmpty {
             ContentUnavailableView("没有个人视频文件夹", systemImage: "folder")
         } else {
@@ -304,8 +307,22 @@ struct CinemaHomeView: View {
         items.filter { $0.libraryKind == .personalVideos }
     }
 
+    private var activeFolders: [CinemaLibraryFolder] {
+        indexedFolders.isEmpty ? folders : indexedFolders
+    }
+
     private var favoriteItems: [CinemaScannedItem] {
-        items.filter { viewingState(for: $0).isFavorite }
+        items
+            .filter { viewingState(for: $0).isFavorite }
+            .sorted { lhs, rhs in
+                let lhsName = URL(fileURLWithPath: lhs.videoPath ?? lhs.folderPath).lastPathComponent
+                let rhsName = URL(fileURLWithPath: rhs.videoPath ?? rhs.folderPath).lastPathComponent
+                let comparison = lhsName.localizedStandardCompare(rhsName)
+                if comparison == .orderedSame {
+                    return (lhs.videoPath ?? lhs.id) < (rhs.videoPath ?? rhs.id)
+                }
+                return comparison == .orderedAscending
+            }
     }
 
     private var recentVideoItems: [CinemaScannedItem] {
@@ -439,20 +456,16 @@ struct CinemaHomeView: View {
 
     private func scan() async {
         guard !isScanning else { return }
-        guard !folders.isEmpty else {
-            items = []
-            return
-        }
-
         isScanning = true
         errorMessage = nil
         defer { isScanning = false }
 
         do {
-            let scannedItems = try await scanAction(folders, items)
-            items = scannedItems
+            let snapshot = try await scanAction(folders, items)
+            indexedFolders = snapshot.folders
+            items = snapshot.items
             CinemaLibraryCacheStore().save(
-                scannedItems,
+                snapshot.items,
                 serverURLString: serverURLString,
                 account: account
             )
@@ -1062,6 +1075,7 @@ private struct TVShowGroup: Identifiable {
 private struct TVShowDetailView: View {
     let group: TVShowGroup
     let artworkURLAction: (String?) -> URL?
+    let thumbnailURLAction: (String?) -> URL?
     let playAction: (CinemaScannedItem) -> Void
     let stateAction: (CinemaScannedItem) -> CinemaViewingState
     let progressAction: (String?) -> TimeInterval
@@ -1090,7 +1104,7 @@ private struct TVShowDetailView: View {
                         NavigationLink {
                             CinemaMediaDetailView(
                                 item: episode,
-                                posterURL: artworkURLAction(episode.posterPath ?? group.show.posterPath),
+                                posterURL: posterURL(for: episode),
                                 viewingState: stateAction(episode),
                                 playbackDuration: durationAction(episode.videoPath),
                                 playAction: { playAction(episode) },
@@ -1100,7 +1114,7 @@ private struct TVShowDetailView: View {
                         } label: {
                             CinemaMediaRow(
                                 item: episode,
-                                posterURL: artworkURLAction(episode.posterPath ?? group.show.posterPath),
+                                posterURL: posterURL(for: episode),
                                 viewingState: stateAction(episode),
                                 progress: progressAction(episode.videoPath),
                                 duration: durationAction(episode.videoPath)
@@ -1121,6 +1135,11 @@ private struct TVShowDetailView: View {
         .listStyle(.insetGrouped)
         .navigationTitle(group.show.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func posterURL(for episode: CinemaScannedItem) -> URL? {
+        artworkURLAction(episode.posterPath ?? group.show.posterPath)
+            ?? thumbnailURLAction(episode.videoPath)
     }
 
     private var allEpisodesAreWatched: Bool {

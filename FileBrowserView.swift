@@ -28,7 +28,7 @@ struct FileBrowserView: View {
     let loadMoveDestinationFoldersAction: (String) async -> [SynologyFileItem]
     let loadSearchFoldersAction: (String) async -> [SynologyFileItem]
     let searchAction: (String, [String]) async throws -> [SynologyFileItem]
-    let scanCinemaAction: ([CinemaLibraryFolder], [CinemaScannedItem]) async throws -> [CinemaScannedItem]
+    let scanCinemaAction: ([CinemaLibraryFolder], [CinemaScannedItem]) async throws -> CinemaIndexSnapshot
     let cinemaArtworkURLAction: (String?) -> URL?
     let cinemaThumbnailURLAction: (String?) -> URL?
     let previewCinemaAction: (CinemaScannedItem) -> Void
@@ -783,6 +783,41 @@ private struct SelectionActionBar: View {
     }
 }
 
+private struct CinemaIndexServiceSettingsView: View {
+    @State private var settings = CinemaIndexServiceSettings(
+        serverURLString: CinemaIndexServiceSettingsStore.defaultServerURLString,
+        token: ""
+    )
+
+    var body: some View {
+        Form {
+            Section("连接") {
+                TextField("服务地址", text: $settings.serverURLString)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                SecureField("Bearer Token", text: $settings.token)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            }
+
+            Section {
+                Text("影院同步将从该服务读取资料库和媒体索引；视频播放、海报访问、收藏夹及播放记录仍使用原有方式。Token 只保存在本机钥匙串中。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("媒体索引服务")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            settings = CinemaIndexServiceSettingsStore().load()
+        }
+        .onDisappear {
+            CinemaIndexServiceSettingsStore().save(settings)
+        }
+    }
+}
+
 private struct SettingsView: View {
     let serverURLString: String
     let account: String
@@ -816,20 +851,9 @@ private struct SettingsView: View {
 
             Section("影院") {
                 NavigationLink {
-                    CinemaLibrarySettingsView(
-                        folders: $cinemaLibraryFolders,
-                        serverURLString: serverURLString,
-                        account: account,
-                        loadFoldersAction: loadSearchFoldersAction
-                    )
+                    CinemaIndexServiceSettingsView()
                 } label: {
-                    HStack {
-                        Label("影院资料库", systemImage: "film.stack")
-                        Spacer()
-                        Text(cinemaLibraryFolders.isEmpty ? "未配置" : "\(cinemaLibraryFolders.count) 个目录")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
+                    Label("媒体索引服务", systemImage: "server.rack")
                 }
 
                 Button {
@@ -846,7 +870,7 @@ private struct SettingsView: View {
                         }
                     }
                 }
-                .disabled(isCinemaSyncing || cinemaLibraryFolders.isEmpty)
+                .disabled(isCinemaSyncing)
 
                 if let lastCinemaSyncAt {
                     LabeledContent("上次同步") {
