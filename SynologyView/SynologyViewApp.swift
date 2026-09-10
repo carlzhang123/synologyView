@@ -11,6 +11,18 @@ import UIKit
 final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(
         _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        guard identifier == BackgroundUploadManager.sessionIdentifier else {
+            completionHandler()
+            return
+        }
+        BackgroundUploadManager.shared.handleEvents(completionHandler: completionHandler)
+    }
+
+    func application(
+        _ application: UIApplication,
         supportedInterfaceOrientationsFor window: UIWindow?
     ) -> UIInterfaceOrientationMask {
         .allButUpsideDown

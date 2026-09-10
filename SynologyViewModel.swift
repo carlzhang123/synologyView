@@ -35,6 +35,7 @@ final class SynologyViewModel {
     private(set) var fileStationFavoriteAPI: SynologyAPIInfo?
     private(set) var fileStationThumbAPI: SynologyAPIInfo?
     private(set) var fileStationUploadAPI: SynologyAPIInfo?
+    private(set) var fileStationCreateFolderAPI: SynologyAPIInfo?
     private(set) var fileStationRenameAPI: SynologyAPIInfo?
     private(set) var fileStationCopyMoveAPI: SynologyAPIInfo?
     private(set) var fileStationDeleteAPI: SynologyAPIInfo?
@@ -46,6 +47,7 @@ final class SynologyViewModel {
     private var didAttemptAutoLogin = false
     private let settingsStore = SynologyLoginSettingsStore()
     private let fileOperationSettingsStore = FileOperationSettingsStore()
+    private let uploadProgressStore = UploadProgressStore()
     private let playbackProgressStore = PlaybackProgressStore()
 
     init() {
@@ -56,6 +58,18 @@ final class SynologyViewModel {
         allowsInsecureConnections = settings.allowsInsecureConnections
         password = settingsStore.loadPassword(serverURLString: settings.lastServer, account: settings.lastAccount) ?? ""
         lastMoveDestinationPath = fileOperationSettingsStore.loadLastMoveDestinationPath()
+        uploadProgressItems = uploadProgressStore.load()
+
+        BackgroundUploadManager.shared.setEventHandler { [weak self] event in
+            Task { @MainActor in
+                self?.applyBackgroundUploadEvent(event)
+            }
+        }
+        Task { [weak self] in
+            let activeTaskIDs = await BackgroundUploadManager.shared.activeTaskIDs()
+            self?.reconcilePersistedUploads(activeTaskIDs: activeTaskIDs)
+            self?.cleanupOrphanedTemporaryFiles(activeTaskIDs: activeTaskIDs)
+        }
     }
 
     var isConnected: Bool {
@@ -490,6 +504,34 @@ final class SynologyViewModel {
         await loadMoveDestinationFolders(at: path).filter(\.isDirectory)
     }
 
+    func createFolder(named name: String, in parentPath: String) async {
+        await runNetworkOperation {
+            let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let destination = normalizedPath(parentPath)
+            guard !cleanName.isEmpty, !cleanName.contains("/") else {
+                throw SynologyClientError.invalidFileName
+            }
+            guard !destination.isEmpty else {
+                throw SynologyClientError.invalidDestinationPath
+            }
+            guard let sessionID else {
+                throw SynologyClientError.notAuthenticated
+            }
+
+            let client = try SynologyClient(serverURLString: serverURLString, sessionID: sessionID)
+            let apis = discoveredAPIs.isEmpty ? try await client.discoverAPIs() : discoveredAPIs
+            applyDiscoveredAPIs(apis)
+
+            guard let fileStationCreateFolderAPI else {
+                throw SynologyClientError.missingAPI("SYNO.FileStation.CreateFolder")
+            }
+
+            try await client.createFolder(api: fileStationCreateFolderAPI, parentPath: destination, name: cleanName)
+            try await reloadAfterFileOperation(using: client)
+            statusMessage = "已新建文件夹 \(cleanName)"
+        }
+    }
+
     func rename(_ item: SynologyFileItem, to newName: String) async {
         await runNetworkOperation {
             let cleanName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -567,10 +609,13 @@ final class SynologyViewModel {
                 destinationPath: destination,
                 progress: 0,
                 status: .queued,
-                errorMessage: nil
+                errorMessage: nil,
+                sourceFilePath: file.fileURL.path,
+                creationDate: file.creationDate
             )
         }
         uploadProgressItems.append(contentsOf: newItems)
+        uploadProgressStore.save(uploadProgressItems)
         statusMessage = "已加入上传队列：\(files.count) 个项目"
 
         Task {
@@ -583,8 +628,6 @@ final class SynologyViewModel {
         progressItems: [UploadProgressItem],
         destination: String
     ) async {
-        defer { cleanupUploadFiles(files) }
-
         do {
             guard let sessionID else {
                 throw SynologyClientError.notAuthenticated
@@ -598,18 +641,36 @@ final class SynologyViewModel {
                 throw SynologyClientError.missingAPI("SYNO.FileStation.Upload")
             }
 
-            for (file, item) in zip(files, progressItems) {
-                let itemID = item.id
-                updateUploadItem(itemID, status: .uploading, progress: 0.01)
-                do {
-                    try await client.upload(api: fileStationUploadAPI, file: file, to: destination) { [weak self, itemID] progress in
-                        Task { @MainActor in
-                            self?.updateUploadItem(itemID, status: .uploading, progress: progress)
+            await withTaskGroup(of: (UUID, String?).self) { group in
+                for (file, item) in zip(files, progressItems) {
+                    let itemID = item.id
+                    updateUploadItem(itemID, status: .uploading, progress: 0.01)
+                    group.addTask { [weak self] in
+                        do {
+                            try await client.upload(
+                                api: fileStationUploadAPI,
+                                file: file,
+                                to: destination,
+                                taskID: itemID
+                            ) { progress in
+                                Task { @MainActor [weak self] in
+                                    self?.updateUploadItem(itemID, status: .uploading, progress: progress)
+                                }
+                            }
+                            try? FileManager.default.removeItem(at: file.fileURL.deletingLastPathComponent())
+                            return (itemID, nil)
+                        } catch {
+                            return (itemID, error.localizedDescription)
                         }
                     }
-                    updateUploadItem(itemID, status: .finished, progress: 1)
-                } catch {
-                    updateUploadItem(itemID, status: .failed, errorMessage: error.localizedDescription)
+                }
+
+                for await (itemID, errorMessage) in group {
+                    if let errorMessage {
+                        updateUploadItem(itemID, status: .failed, errorMessage: errorMessage)
+                    } else {
+                        updateUploadItem(itemID, status: .finished, progress: 1)
+                    }
                 }
             }
 
@@ -623,6 +684,28 @@ final class SynologyViewModel {
             if shouldReturnToLogin(for: error) {
                 logout(message: "连接已失效，请重新登录")
             }
+        }
+    }
+
+    func retryUpload(_ id: UUID) {
+        guard let item = uploadProgressItems.first(where: { $0.id == id }), item.status == .failed else {
+            return
+        }
+        guard let sourceFilePath = item.sourceFilePath,
+              FileManager.default.fileExists(atPath: sourceFilePath) else {
+            updateUploadItem(id, status: .failed, progress: 0, errorMessage: "原始临时文件已被系统清理，请重新选择文件")
+            return
+        }
+
+        let file = SynologyUploadFile(
+            fileURL: URL(fileURLWithPath: sourceFilePath),
+            fileName: item.fileName,
+            creationDate: item.creationDate
+        )
+        updateUploadItem(id, status: .queued, progress: 0)
+        guard let progressItem = uploadProgressItems.first(where: { $0.id == id }) else { return }
+        Task {
+            await uploadFilesInBackground([file], progressItems: [progressItem], destination: item.destinationPath)
         }
     }
 
@@ -674,6 +757,75 @@ final class SynologyViewModel {
             uploadProgressItems[index].progress = min(max(progress, 0), 1)
         }
         uploadProgressItems[index].errorMessage = errorMessage
+        uploadProgressStore.save(uploadProgressItems)
+    }
+
+    private func applyBackgroundUploadEvent(_ event: BackgroundUploadEvent) {
+        updateUploadItem(
+            event.taskID,
+            status: event.status,
+            progress: event.progress,
+            errorMessage: event.errorMessage
+        )
+    }
+
+    private func reconcilePersistedUploads(activeTaskIDs: Set<UUID>) {
+        for index in uploadProgressItems.indices {
+            let item = uploadProgressItems[index]
+            guard item.status == .queued || item.status == .uploading else { continue }
+            if activeTaskIDs.contains(item.id) {
+                uploadProgressItems[index].status = .uploading
+            } else {
+                uploadProgressItems[index].status = .failed
+                uploadProgressItems[index].errorMessage = "上传任务未能在系统清理后恢复"
+            }
+        }
+        uploadProgressStore.save(uploadProgressItems)
+    }
+
+    private func cleanupOrphanedTemporaryFiles(activeTaskIDs: Set<UUID>) {
+        let fileManager = FileManager.default
+        let temporaryDirectory = fileManager.temporaryDirectory
+        let protectedNames = Set(activeTaskIDs.map { "SynologyViewMultipart-\($0.uuidString).body" })
+        let protectedSourceDirectories = Set(uploadProgressItems.compactMap { item -> String? in
+            guard item.status == .failed, let sourceFilePath = item.sourceFilePath else { return nil }
+            return URL(fileURLWithPath: sourceFilePath).deletingLastPathComponent().standardizedFileURL.path
+        })
+        let cutoffDate = Date().addingTimeInterval(-24 * 60 * 60)
+
+        if let files = try? fileManager.contentsOfDirectory(
+            at: temporaryDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for file in files where file.lastPathComponent.hasPrefix("SynologyViewMultipart-") {
+                guard !protectedNames.contains(file.lastPathComponent),
+                      let values = try? file.resourceValues(forKeys: [.contentModificationDateKey]),
+                      (values.contentModificationDate ?? .distantPast) < cutoffDate else { continue }
+                try? fileManager.removeItem(at: file)
+            }
+
+            // Quick Look directories can only survive when the app was terminated before
+            // the preview's onDisappear cleanup ran, so they are safe to remove at launch.
+            for file in files where file.lastPathComponent.hasPrefix("SynologyViewQuickLook-") {
+                try? fileManager.removeItem(at: file)
+            }
+        }
+
+        for directoryName in ["SynologyViewUploads", "SynologyViewPhotoPicker"] {
+            let directory = temporaryDirectory.appendingPathComponent(directoryName, isDirectory: true)
+            guard let children = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for child in children {
+                guard !protectedSourceDirectories.contains(child.standardizedFileURL.path),
+                      let values = try? child.resourceValues(forKeys: [.contentModificationDateKey]),
+                      (values.contentModificationDate ?? .distantPast) < cutoffDate else { continue }
+                try? fileManager.removeItem(at: child)
+            }
+        }
     }
 
     private func cleanupUploadFiles(_ files: [SynologyUploadFile]) {
@@ -783,6 +935,7 @@ final class SynologyViewModel {
         fileStationFavoriteAPI = apis.first { $0.name == "SYNO.FileStation.Favorite" }
         fileStationThumbAPI = apis.first { $0.name == "SYNO.FileStation.Thumb" }
         fileStationUploadAPI = apis.first { $0.name == "SYNO.FileStation.Upload" }
+        fileStationCreateFolderAPI = apis.first { $0.name == "SYNO.FileStation.CreateFolder" }
         fileStationRenameAPI = apis.first { $0.name == "SYNO.FileStation.Rename" }
         fileStationCopyMoveAPI = apis.first { $0.name == "SYNO.FileStation.CopyMove" }
         fileStationDeleteAPI = apis.first { $0.name == "SYNO.FileStation.Delete" }

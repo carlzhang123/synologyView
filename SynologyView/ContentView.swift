@@ -27,7 +27,6 @@ struct ContentView: View {
                     isLoading: model.isLoading,
                     uploadProgressItems: model.uploadProgressItems,
                     allowsInsecureConnections: $model.allowsInsecureConnections,
-                    canGoUp: model.canGoUp,
                     canGoBack: model.canGoBack,
                     canGoFavoriteBack: model.canGoFavoriteBack,
                     refreshAction: {
@@ -53,6 +52,12 @@ struct ContentView: View {
                     },
                     uploadMediaAction: { files, destinationPath in
                         await model.upload(files, to: destinationPath)
+                    },
+                    retryUploadAction: { id in
+                        model.retryUpload(id)
+                    },
+                    createFolderAction: { name, parentPath in
+                        Task { await model.createFolder(named: name, in: parentPath) }
                     },
                     renameAction: { item, newName in
                         Task { await model.rename(item, to: newName) }
@@ -99,12 +104,6 @@ struct ContentView: View {
                     },
                     favoriteBackAction: {
                         Task { await model.goFavoriteBack() }
-                    },
-                    upAction: {
-                        Task { await model.openParentFolder() }
-                    },
-                    favoriteUpAction: {
-                        Task { await model.openFavoriteParentFolder() }
                     },
                     logoutAction: {
                         model.logout()

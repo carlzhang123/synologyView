@@ -1,4 +1,6 @@
 import AVKit
+import PDFKit
+import QuickLook
 import SwiftUI
 import UIKit
 
@@ -30,12 +32,296 @@ struct MediaPreviewView: View {
                     initialImage: SynologyImagePreviewItem(file: item.file, url: item.url),
                     images: item.imageGallery
                 )
+            } else if item.file.isQuickLookDocument {
+                QuickLookDocumentPreview(file: item.file, url: item.url)
+            } else if item.file.isPDF || item.file.isText || item.file.hasNoFileExtension || item.file.isHiddenTextCandidate {
+                DocumentPreview(file: item.file, url: item.url)
             } else {
                 ContentUnavailableView("无法预览", systemImage: "doc")
             }
         }
         .navigationBarBackButtonHidden()
         .toolbar(.hidden, for: .navigationBar)
+    }
+}
+
+private struct QuickLookDocumentPreview: View {
+    let file: SynologyFileItem
+    let url: URL
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var localFileURL: URL?
+    @State private var temporaryDirectoryURL: URL?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color(uiColor: .systemBackground)
+                .ignoresSafeArea()
+
+            if let localFileURL {
+                QuickLookPreviewController(fileURL: localFileURL)
+                    .ignoresSafeArea()
+            } else if let errorMessage {
+                ContentUnavailableView(
+                    "无法预览此文档",
+                    systemImage: "doc.badge.ellipsis",
+                    description: Text(errorMessage)
+                )
+                .padding(.top, 58)
+            } else {
+                ProgressView("正在下载文档…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            MediaPreviewCloseButton(fileName: file.name) {
+                dismiss()
+            }
+        }
+        .task(id: url) {
+            await downloadDocument()
+        }
+        .onDisappear {
+            removeTemporaryDocument()
+        }
+    }
+
+    private func downloadDocument() async {
+        var createdDirectory: URL?
+        do {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 120
+            let (downloadedURL, response) = try await SynologyNetworkSession.make().download(for: request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  200..<300 ~= httpResponse.statusCode else {
+                throw DocumentPreviewError.downloadFailed
+            }
+
+            try Task.checkCancellation()
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("SynologyViewQuickLook-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            createdDirectory = directory
+
+            let safeFileName = URL(fileURLWithPath: file.name).lastPathComponent
+            let destinationURL = directory.appendingPathComponent(safeFileName, isDirectory: false)
+            try FileManager.default.moveItem(at: downloadedURL, to: destinationURL)
+            try Task.checkCancellation()
+
+            temporaryDirectoryURL = directory
+            localFileURL = destinationURL
+        } catch is CancellationError {
+            if let createdDirectory {
+                try? FileManager.default.removeItem(at: createdDirectory)
+            }
+        } catch {
+            if let createdDirectory {
+                try? FileManager.default.removeItem(at: createdDirectory)
+            }
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    private func removeTemporaryDocument() {
+        guard let temporaryDirectoryURL else { return }
+        try? FileManager.default.removeItem(at: temporaryDirectoryURL)
+        self.temporaryDirectoryURL = nil
+        localFileURL = nil
+    }
+}
+
+private struct QuickLookPreviewController: UIViewControllerRepresentable {
+    let fileURL: URL
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(fileURL: fileURL)
+    }
+
+    func makeUIViewController(context: Context) -> QLPreviewController {
+        let controller = QLPreviewController()
+        controller.dataSource = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ controller: QLPreviewController, context: Context) {
+        context.coordinator.fileURL = fileURL
+        controller.reloadData()
+    }
+
+    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        var fileURL: URL
+
+        init(fileURL: URL) {
+            self.fileURL = fileURL
+        }
+
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
+            1
+        }
+
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
+            fileURL as NSURL
+        }
+    }
+}
+
+private struct DocumentPreview: View {
+    let file: SynologyFileItem
+    let url: URL
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var pdfDocument: PDFDocument?
+    @State private var textContent: String?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color(uiColor: .systemBackground)
+                .ignoresSafeArea()
+
+            documentContent
+                .padding(.top, 58)
+
+            MediaPreviewCloseButton(fileName: file.name) {
+                dismiss()
+            }
+        }
+        .task(id: url) {
+            await loadDocument()
+        }
+    }
+
+    @ViewBuilder
+    private var documentContent: some View {
+        if let pdfDocument {
+            PDFDocumentView(document: pdfDocument)
+                .ignoresSafeArea(edges: .bottom)
+        } else if let textContent {
+            SelectableTextView(text: textContent)
+                .ignoresSafeArea(edges: .bottom)
+        } else if let errorMessage {
+            ContentUnavailableView(
+                "无法预览此文件",
+                systemImage: "doc.badge.ellipsis",
+                description: Text(errorMessage)
+            )
+        } else {
+            ProgressView("正在载入…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func loadDocument() async {
+        do {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 60
+            let (data, response) = try await SynologyNetworkSession.make().data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  200..<300 ~= httpResponse.statusCode else {
+                throw DocumentPreviewError.downloadFailed
+            }
+
+            try Task.checkCancellation()
+            if file.isPDF {
+                guard let document = PDFDocument(data: data) else {
+                    throw DocumentPreviewError.invalidPDF
+                }
+                pdfDocument = document
+            } else {
+                guard let text = decodedText(from: data) else {
+                    throw DocumentPreviewError.notText
+                }
+                textContent = text
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    private func decodedText(from data: Data) -> String? {
+        guard !data.isEmpty else { return "" }
+
+        let bytes = Array(data.prefix(4))
+        if bytes.starts(with: [0x00, 0x00, 0xFE, 0xFF]) || bytes.starts(with: [0xFF, 0xFE, 0x00, 0x00]),
+           let text = String(data: data, encoding: .utf32) {
+            return text
+        }
+        if bytes.starts(with: [0xFF, 0xFE]) || bytes.starts(with: [0xFE, 0xFF]),
+           let text = String(data: data, encoding: .utf16) {
+            return text
+        }
+
+        let prefix = data.prefix(8_192)
+        let controlByteCount = prefix.reduce(into: 0) { count, byte in
+            if byte == 0 || (byte < 0x09) || (byte > 0x0D && byte < 0x20) {
+                count += 1
+            }
+        }
+        guard Double(controlByteCount) / Double(prefix.count) < 0.02 else {
+            return nil
+        }
+
+        return String(data: data, encoding: .utf8)
+    }
+}
+
+private struct PDFDocumentView: UIViewRepresentable {
+    let document: PDFDocument
+
+    func makeUIView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        view.displayDirection = .vertical
+        view.backgroundColor = .systemBackground
+        return view
+    }
+
+    func updateUIView(_ view: PDFView, context: Context) {
+        if view.document !== document {
+            view.document = document
+        }
+    }
+}
+
+private struct SelectableTextView: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.alwaysBounceVertical = true
+        view.font = .monospacedSystemFont(ofSize: 15, weight: .regular)
+        view.adjustsFontForContentSizeCategory = true
+        view.backgroundColor = .systemBackground
+        view.textContainerInset = UIEdgeInsets(top: 16, left: 12, bottom: 24, right: 12)
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        if view.text != text {
+            view.text = text
+        }
+    }
+}
+
+private enum DocumentPreviewError: LocalizedError {
+    case downloadFailed
+    case invalidPDF
+    case notText
+
+    var errorDescription: String? {
+        switch self {
+        case .downloadFailed:
+            return "文件下载失败，请稍后重试。"
+        case .invalidPDF:
+            return "文件内容不是有效的 PDF。"
+        case .notText:
+            return "未检测到可读取的文本内容。"
+        }
     }
 }
 

@@ -267,6 +267,25 @@ struct SynologyClient {
         }
     }
 
+    func createFolder(api: SynologyAPIInfo, parentPath: String, name: String) async throws {
+        let url = try makeAPIURL(
+            api: api,
+            method: "create",
+            version: min(api.maxVersion, 2),
+            parameters: [
+                URLQueryItem(name: "folder_path", value: try jsonEncodedString([parentPath])),
+                URLQueryItem(name: "name", value: try jsonEncodedString([name])),
+                URLQueryItem(name: "force_parent", value: "false")
+            ],
+            includeSession: true
+        )
+
+        let response: SynologyFileOperationResponse = try await request(url)
+        guard response.success else {
+            throw SynologyClientError.apiError(response.error?.code, apiName: api.name)
+        }
+    }
+
     func rename(api: SynologyAPIInfo, item: SynologyFileItem, newName: String) async throws {
         let url = try makeAPIURL(
             api: api,
@@ -332,6 +351,7 @@ struct SynologyClient {
         api: SynologyAPIInfo,
         file: SynologyUploadFile,
         to destinationPath: String,
+        taskID: UUID,
         progressHandler: @escaping (Double) -> Void
     ) async throws {
         guard sessionID != nil else {
@@ -349,18 +369,19 @@ struct SynologyClient {
         let multipartURL = try makeMultipartUploadFile(
             sourceFile: file,
             destinationPath: destinationPath,
-            boundary: boundary
+            boundary: boundary,
+            taskID: taskID
         )
-        defer { try? FileManager.default.removeItem(at: multipartURL) }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
-        let (data, response) = try await UploadProgressDelegate.upload(
+        let (data, response) = try await BackgroundUploadManager.shared.upload(
             request: request,
             fileURL: multipartURL,
+            taskID: taskID,
             progressHandler: progressHandler,
             allowsInsecureConnections: SynologyNetworkSession.allowsInsecureConnections
         )
@@ -508,9 +529,17 @@ struct SynologyClient {
         }
     }
 
-    private func makeMultipartUploadFile(sourceFile: SynologyUploadFile, destinationPath: String, boundary: String) throws -> URL {
+    private func makeMultipartUploadFile(
+        sourceFile: SynologyUploadFile,
+        destinationPath: String,
+        boundary: String,
+        taskID: UUID
+    ) throws -> URL {
         let multipartURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("SynologyViewMultipart-\(UUID().uuidString).body")
+            .appendingPathComponent("SynologyViewMultipart-\(taskID.uuidString).body")
+        if FileManager.default.fileExists(atPath: multipartURL.path) {
+            try FileManager.default.removeItem(at: multipartURL)
+        }
         FileManager.default.createFile(atPath: multipartURL.path, contents: nil)
 
         let handle = try FileHandle(forWritingTo: multipartURL)
@@ -652,9 +681,21 @@ enum SynologyNetworkSession {
         UserDefaults.standard.bool(forKey: SynologyLoginSettingsStore.allowsInsecureConnectionsKey)
     }
 
+    private static let secureSession = makeSession(allowsInsecureConnections: false)
+    private static let insecureSession = makeSession(allowsInsecureConnections: true)
+
     static func make() -> URLSession {
-        URLSession(
-            configuration: .default,
+        allowsInsecureConnections ? insecureSession : secureSession
+    }
+
+    private static func makeSession(allowsInsecureConnections: Bool) -> URLSession {
+        let configuration = URLSessionConfiguration.default
+        configuration.urlCache = URLCache(
+            memoryCapacity: 8 * 1024 * 1024,
+            diskCapacity: 64 * 1024 * 1024
+        )
+        return URLSession(
+            configuration: configuration,
             delegate: ServerTrustDelegate(allowsInsecureConnections: allowsInsecureConnections),
             delegateQueue: nil
         )
@@ -684,37 +725,90 @@ private final class ServerTrustDelegate: NSObject, URLSessionDelegate {
     }
 }
 
-private final class UploadProgressDelegate: NSObject, URLSessionDataDelegate {
-    private let progressHandler: (Double) -> Void
-    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
-    private var responseData = Data()
-    private let allowsInsecureConnections: Bool
+struct BackgroundUploadEvent: Sendable {
+    let taskID: UUID
+    let progress: Double
+    let status: UploadProgressStatus
+    let errorMessage: String?
+}
 
-    private init(progressHandler: @escaping (Double) -> Void, allowsInsecureConnections: Bool) {
-        self.progressHandler = progressHandler
-        self.allowsInsecureConnections = allowsInsecureConnections
+final class BackgroundUploadManager: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    static let shared = BackgroundUploadManager()
+    static let sessionIdentifier = "com.synologyview.background-upload"
+
+    private struct ActiveUpload {
+        let continuation: CheckedContinuation<(Data, URLResponse), Error>
+        let progressHandler: (Double) -> Void
     }
 
-    static func upload(
+    private let stateQueue = DispatchQueue(label: "com.synologyview.background-upload.state")
+    private var activeUploads: [Int: ActiveUpload] = [:]
+    private var responseData: [Int: Data] = [:]
+    private var eventHandler: ((BackgroundUploadEvent) -> Void)?
+    private var pendingEvents: [BackgroundUploadEvent] = []
+    private var backgroundEventsCompletionHandler: (() -> Void)?
+
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
+        configuration.sessionSendsLaunchEvents = true
+        configuration.isDiscretionary = false
+        configuration.waitsForConnectivity = true
+        configuration.allowsCellularAccess = true
+        configuration.httpMaximumConnectionsPerHost = 2
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
+
+    private override init() {
+        super.init()
+        _ = session
+    }
+
+    func upload(
         request: URLRequest,
         fileURL: URL,
+        taskID: UUID,
         progressHandler: @escaping (Double) -> Void,
         allowsInsecureConnections: Bool
     ) async throws -> (Data, URLResponse) {
-        let delegate = UploadProgressDelegate(
-            progressHandler: progressHandler,
-            allowsInsecureConnections: allowsInsecureConnections
-        )
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                delegate.continuation = continuation
-                let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
-                let task = session.uploadTask(with: request, fromFile: fileURL)
-                task.resume()
+        _ = allowsInsecureConnections
+        return try await withCheckedThrowingContinuation { continuation in
+            let task = session.uploadTask(with: request, fromFile: fileURL)
+            task.taskDescription = taskID.uuidString
+            stateQueue.sync {
+                activeUploads[task.taskIdentifier] = ActiveUpload(
+                    continuation: continuation,
+                    progressHandler: progressHandler
+                )
+                responseData[task.taskIdentifier] = Data()
             }
-        } onCancel: {
-            progressHandler(0)
+            task.resume()
         }
+    }
+
+    func setEventHandler(_ handler: @escaping (BackgroundUploadEvent) -> Void) {
+        let events = stateQueue.sync { () -> [BackgroundUploadEvent] in
+            eventHandler = handler
+            defer { pendingEvents.removeAll() }
+            return pendingEvents
+        }
+        events.forEach(handler)
+    }
+
+    func activeTaskIDs() async -> Set<UUID> {
+        await withCheckedContinuation { continuation in
+            session.getAllTasks { tasks in
+                continuation.resume(returning: Set(tasks.compactMap { task in
+                    task.taskDescription.flatMap(UUID.init(uuidString:))
+                }))
+            }
+        }
+    }
+
+    func handleEvents(completionHandler: @escaping () -> Void) {
+        stateQueue.sync {
+            backgroundEventsCompletionHandler = completionHandler
+        }
+        _ = session
     }
 
     func urlSession(
@@ -722,7 +816,7 @@ private final class UploadProgressDelegate: NSObject, URLSessionDataDelegate {
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        guard allowsInsecureConnections,
+        guard SynologyNetworkSession.allowsInsecureConnections,
               challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
               let serverTrust = challenge.protectionSpace.serverTrust else {
             completionHandler(.performDefaultHandling, nil)
@@ -739,26 +833,88 @@ private final class UploadProgressDelegate: NSObject, URLSessionDataDelegate {
         totalBytesSent: Int64,
         totalBytesExpectedToSend: Int64
     ) {
-        guard totalBytesExpectedToSend > 0 else {
+        guard totalBytesExpectedToSend > 0,
+              let taskID = task.taskDescription.flatMap(UUID.init(uuidString:)) else {
             return
         }
 
-        progressHandler(min(max(Double(totalBytesSent) / Double(totalBytesExpectedToSend), 0), 1))
+        let progress = min(max(Double(totalBytesSent) / Double(totalBytesExpectedToSend), 0), 1)
+        let handler = stateQueue.sync { activeUploads[task.taskIdentifier]?.progressHandler }
+        handler?(progress)
+        emit(BackgroundUploadEvent(taskID: taskID, progress: progress, status: .uploading, errorMessage: nil))
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        responseData.append(data)
+        stateQueue.sync {
+            responseData[dataTask.taskIdentifier, default: Data()].append(data)
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        session.invalidateAndCancel()
-        if let error {
-            continuation?.resume(throwing: error)
-        } else if let response = task.response {
-            continuation?.resume(returning: (responseData, response))
-        } else {
-            continuation?.resume(throwing: SynologyClientError.httpError(nil))
+        let taskID = task.taskDescription.flatMap(UUID.init(uuidString:))
+        let result = stateQueue.sync { () -> (ActiveUpload?, Data) in
+            (activeUploads.removeValue(forKey: task.taskIdentifier), responseData.removeValue(forKey: task.taskIdentifier) ?? Data())
         }
-        continuation = nil
+
+        if let taskID {
+            try? FileManager.default.removeItem(at: multipartFileURL(for: taskID))
+            let event = completionEvent(taskID: taskID, data: result.1, response: task.response, error: error)
+            emit(event)
+        }
+
+        if let activeUpload = result.0 {
+            if let error {
+                activeUpload.continuation.resume(throwing: error)
+            } else if let response = task.response {
+                activeUpload.continuation.resume(returning: (result.1, response))
+            } else {
+                activeUpload.continuation.resume(throwing: SynologyClientError.httpError(nil))
+            }
+        }
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        let completionHandler = stateQueue.sync { () -> (() -> Void)? in
+            defer { backgroundEventsCompletionHandler = nil }
+            return backgroundEventsCompletionHandler
+        }
+        DispatchQueue.main.async {
+            completionHandler?()
+        }
+    }
+
+    private func completionEvent(
+        taskID: UUID,
+        data: Data,
+        response: URLResponse?,
+        error: Error?
+    ) -> BackgroundUploadEvent {
+        if let error {
+            return BackgroundUploadEvent(taskID: taskID, progress: 0, status: .failed, errorMessage: error.localizedDescription)
+        }
+        guard let httpResponse = response as? HTTPURLResponse, 200..<300 ~= httpResponse.statusCode else {
+            return BackgroundUploadEvent(taskID: taskID, progress: 0, status: .failed, errorMessage: "后台上传请求失败")
+        }
+        guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              payload["success"] as? Bool == true else {
+            return BackgroundUploadEvent(taskID: taskID, progress: 0, status: .failed, errorMessage: "群晖未能完成后台上传")
+        }
+        return BackgroundUploadEvent(taskID: taskID, progress: 1, status: .finished, errorMessage: nil)
+    }
+
+    private func emit(_ event: BackgroundUploadEvent) {
+        let handler = stateQueue.sync { () -> ((BackgroundUploadEvent) -> Void)? in
+            guard let eventHandler else {
+                pendingEvents.append(event)
+                return nil
+            }
+            return eventHandler
+        }
+        handler?(event)
+    }
+
+    private func multipartFileURL(for taskID: UUID) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("SynologyViewMultipart-\(taskID.uuidString).body")
     }
 }

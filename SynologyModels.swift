@@ -39,13 +39,15 @@ struct SynologyUploadFile: Equatable {
     let creationDate: Date?
 }
 
-struct UploadProgressItem: Identifiable, Equatable {
+struct UploadProgressItem: Identifiable, Equatable, Codable {
     let id: UUID
     let fileName: String
     let destinationPath: String
     var progress: Double
     var status: UploadProgressStatus
     var errorMessage: String?
+    let sourceFilePath: String?
+    let creationDate: Date?
 
     var progressText: String {
         switch status {
@@ -61,7 +63,7 @@ struct UploadProgressItem: Identifiable, Equatable {
     }
 }
 
-enum UploadProgressStatus: Equatable {
+enum UploadProgressStatus: String, Equatable, Codable {
     case queued
     case uploading
     case finished
@@ -90,7 +92,7 @@ struct SynologyFileItem: Identifiable, Equatable {
             parts.append("文件")
         }
 
-        if let size {
+        if !isDirectory, let size {
             parts.append(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
         }
 
@@ -102,7 +104,7 @@ struct SynologyFileItem: Identifiable, Equatable {
     }
 
     var isPreviewable: Bool {
-        isVideo || isImage
+        isVideo || isImage || isPDF || isText || isQuickLookDocument || hasNoFileExtension || isHiddenTextCandidate
     }
 
     var isVideo: Bool {
@@ -113,6 +115,40 @@ struct SynologyFileItem: Identifiable, Equatable {
     var isImage: Bool {
         let imageExtensions: Set<String> = ["bmp", "gif", "heic", "heif", "jpeg", "jpg", "png", "tif", "tiff", "webp"]
         return imageExtensions.contains(fileExtension)
+    }
+
+    var isPDF: Bool {
+        fileExtension == "pdf"
+    }
+
+    var isText: Bool {
+        let textExtensions: Set<String> = [
+            "txt", "text", "md", "markdown", "log", "csv", "json", "xml",
+            "yaml", "yml", "ini", "conf", "config", "nfo", "srt", "vtt",
+            "py", "pyw", "swift", "m", "mm", "h", "c", "cc", "cpp", "cxx", "hpp",
+            "js", "jsx", "mjs", "cjs", "ts", "tsx", "css", "scss", "sass", "less",
+            "html", "htm", "vue", "svelte", "sh", "bash", "zsh", "fish", "rb", "php",
+            "pl", "lua", "go", "rs", "java", "kt", "kts", "gradle", "groovy", "dart",
+            "cs", "fs", "fsx", "vb", "r", "sql", "graphql", "gql", "toml", "properties",
+            "plist", "xcconfig", "strings", "stringsdict", "podspec", "lock"
+        ]
+        return textExtensions.contains(fileExtension)
+    }
+
+    var isQuickLookDocument: Bool {
+        let documentExtensions: Set<String> = [
+            "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+            "rtf", "rtfd", "pages", "numbers", "key", "odt", "ods", "odp"
+        ]
+        return documentExtensions.contains(fileExtension)
+    }
+
+    var hasNoFileExtension: Bool {
+        fileExtension.isEmpty
+    }
+
+    var isHiddenTextCandidate: Bool {
+        name.hasPrefix(".") && name != "." && name != ".."
     }
 
     private var fileExtension: String {
@@ -376,6 +412,23 @@ enum SynologyClientError: LocalizedError, Equatable {
                 return "重命名失败：群晖无法完成该重命名（1200）"
             default:
                 return "重命名失败：SYNO.FileStation.Rename 返回错误 \(code)"
+            }
+        }
+
+        if apiName == "SYNO.FileStation.CreateFolder" {
+            switch code {
+            case 400:
+                return "新建文件夹失败：参数无效（400）"
+            case 401:
+                return "新建文件夹失败：没有 FileStation 权限（401）"
+            case 407:
+                return "新建文件夹失败：当前 session 已失效，请重新登录（407）"
+            case 1100:
+                return "新建文件夹失败：名称无效、文件夹已存在或没有写入权限（1100）"
+            case 1101:
+                return "新建文件夹失败：当前目录的文件夹数量已达到系统限制（1101）"
+            default:
+                return "新建文件夹失败：SYNO.FileStation.CreateFolder 返回错误 \(code)"
             }
         }
 

@@ -17,11 +17,10 @@ struct PhotoLibraryUploadButton: View {
     var body: some View {
         PhotosPicker(
             selection: $selectedItems,
-            maxSelectionCount: 20,
             matching: .any(of: [.images, .videos]),
             preferredItemEncoding: .current
         ) {
-            Label("上传", systemImage: isPreparingUpload ? "arrow.triangle.2.circlepath" : "square.and.arrow.up")
+            Label("上传", systemImage: isPreparingUpload ? "arrow.triangle.2.circlepath" : "photo.badge.plus")
         }
         .disabled(isDisabled || isPreparingUpload)
         .onChange(of: selectedItems) {

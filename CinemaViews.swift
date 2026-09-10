@@ -799,13 +799,13 @@ private struct CinemaFavoritesView: View {
                 ForEach(items) { item in
                     Group {
                         if item.libraryKind == .personalVideos {
-                            Button {
-                                playAction(item)
-                            } label: {
-                                mediaRow(for: item)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(item.videoPath == nil)
+                            mediaRow(for: item)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    guard item.videoPath != nil else { return }
+                                    playAction(item)
+                                }
+                                .accessibilityAddTraits(.isButton)
                         } else {
                             NavigationLink {
                                 CinemaMediaDetailView(
@@ -879,25 +879,27 @@ private struct CinemaRecentVideosView: View {
                 )
             } else {
                 ForEach(items) { item in
-                    Button {
+                    let viewingState = stateAction(item)
+
+                    CinemaRecentVideoRow(
+                        item: item,
+                        posterURL: posterURLAction(item),
+                        viewingState: viewingState,
+                        progress: progressAction(item.videoPath),
+                        duration: durationAction(item.videoPath)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
                         playAction(item)
-                    } label: {
-                        CinemaRecentVideoRow(
-                            item: item,
-                            posterURL: posterURLAction(item),
-                            viewingState: stateAction(item),
-                            progress: progressAction(item.videoPath),
-                            duration: durationAction(item.videoPath)
-                        )
                     }
-                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(.isButton)
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button {
                             watchedAction(item)
                         } label: {
                             Label(
-                                stateAction(item).isWatched ? "未观看" : "已观看",
-                                systemImage: stateAction(item).isWatched ? "eye.slash" : "eye"
+                                viewingState.isWatched ? "未观看" : "已观看",
+                                systemImage: viewingState.isWatched ? "eye.slash" : "eye"
                             )
                         }
                         .tint(.green)
@@ -906,8 +908,8 @@ private struct CinemaRecentVideosView: View {
                             favoriteAction(item)
                         } label: {
                             Label(
-                                stateAction(item).isFavorite ? "取消收藏" : "收藏",
-                                systemImage: stateAction(item).isFavorite ? "star.slash" : "star"
+                                viewingState.isFavorite ? "取消收藏" : "收藏",
+                                systemImage: viewingState.isFavorite ? "star.slash" : "star"
                             )
                         }
                         .tint(.orange)
@@ -994,25 +996,27 @@ private struct PersonalVideoFolderView: View {
             if !directVideos.isEmpty {
                 Section("视频") {
                     ForEach(directVideos) { item in
-                        Button {
+                        let viewingState = stateAction(item)
+
+                        CinemaMediaRow(
+                            item: item,
+                            posterURL: thumbnailURLAction(item.videoPath),
+                            viewingState: viewingState,
+                            progress: progressAction(item.videoPath),
+                            duration: durationAction(item.videoPath)
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
                             playAction(item)
-                        } label: {
-                            CinemaMediaRow(
-                                item: item,
-                                posterURL: thumbnailURLAction(item.videoPath),
-                                viewingState: stateAction(item),
-                                progress: progressAction(item.videoPath),
-                                duration: durationAction(item.videoPath)
-                            )
                         }
-                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(.isButton)
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                             Button {
                                 watchedAction(item)
                             } label: {
                                 Label(
-                                    stateAction(item).isWatched ? "未观看" : "已观看",
-                                    systemImage: stateAction(item).isWatched ? "eye.slash" : "eye"
+                                    viewingState.isWatched ? "未观看" : "已观看",
+                                    systemImage: viewingState.isWatched ? "eye.slash" : "eye"
                                 )
                             }
                             .tint(.green)
@@ -1021,8 +1025,8 @@ private struct PersonalVideoFolderView: View {
                                 favoriteAction(item)
                             } label: {
                                 Label(
-                                    stateAction(item).isFavorite ? "取消收藏" : "收藏",
-                                    systemImage: stateAction(item).isFavorite ? "star.slash" : "star"
+                                    viewingState.isFavorite ? "取消收藏" : "收藏",
+                                    systemImage: viewingState.isFavorite ? "star.slash" : "star"
                                 )
                             }
                             .tint(.orange)

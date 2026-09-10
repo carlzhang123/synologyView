@@ -11,7 +11,6 @@ struct FileBrowserView: View {
     let isLoading: Bool
     let uploadProgressItems: [UploadProgressItem]
     @Binding var allowsInsecureConnections: Bool
-    let canGoUp: Bool
     let canGoBack: Bool
     let canGoFavoriteBack: Bool
     let refreshAction: () async -> Void
@@ -22,6 +21,8 @@ struct FileBrowserView: View {
     let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
     let thumbnailURLAction: (SynologyFileItem) -> URL?
     let uploadMediaAction: ([SynologyUploadFile], String) async -> Void
+    let retryUploadAction: (UUID) -> Void
+    let createFolderAction: (String, String) -> Void
     let renameAction: (SynologyFileItem, String) -> Void
     let moveAction: ([SynologyFileItem], String) -> Void
     let deleteAction: ([SynologyFileItem]) -> Void
@@ -38,8 +39,6 @@ struct FileBrowserView: View {
     let cinemaViewingStateRevision: Int
     let backAction: () -> Void
     let favoriteBackAction: () -> Void
-    let upAction: () -> Void
-    let favoriteUpAction: () -> Void
     let logoutAction: () -> Void
     let lastMoveDestinationPath: String
 
@@ -48,6 +47,8 @@ struct FileBrowserView: View {
     @State private var selectedItemIDs = Set<String>()
     @State private var renameItem: SynologyFileItem?
     @State private var renameText = ""
+    @State private var isCreateFolderDialogPresented = false
+    @State private var newFolderName = ""
     @State private var moveSelection: FileOperationSelection?
     @State private var deleteSelection: FileOperationSelection?
     @AppStorage("synology.fileDisplayMode") private var displayModeRawValue = FileDisplayMode.list.rawValue
@@ -137,6 +138,7 @@ struct FileBrowserView: View {
                     serverURLString: serverURLString,
                     account: account,
                     uploadProgressItems: uploadProgressItems,
+                    retryUploadAction: retryUploadAction,
                     allowsInsecureConnections: $allowsInsecureConnections,
                     cinemaLibraryFolders: $cinemaLibraryFolders,
                     isCinemaSyncing: isCinemaSyncing,
@@ -173,6 +175,14 @@ struct FileBrowserView: View {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if !isSelectionMode {
                         if supportsFileOperations {
+                            Button {
+                                newFolderName = ""
+                                isCreateFolderDialogPresented = true
+                            } label: {
+                                Label("新建文件夹", systemImage: "folder.badge.plus")
+                            }
+                            .disabled(isLoading || uploadDestinationPath.isEmpty)
+
                             PhotoLibraryUploadButton(
                                 destinationPath: uploadDestinationPath,
                                 isDisabled: isLoading || uploadDestinationPath.isEmpty,
@@ -187,19 +197,6 @@ struct FileBrowserView: View {
                             } label: {
                                 Label("显示模式", systemImage: displayMode.iconName)
                             }
-                        }
-
-                        if canShowUpButton {
-                            Button {
-                                if selectedTab == .favorites {
-                                    navigateFavorites(edge: .leading, action: favoriteUpAction)
-                                } else {
-                                    navigateFiles(edge: .leading, action: upAction)
-                                }
-                            } label: {
-                                Label("上一级", systemImage: "arrow.up.folder")
-                            }
-                            .disabled(isLoading || !canGoUpInSelectedTab)
                         }
 
                     }
@@ -238,6 +235,17 @@ struct FileBrowserView: View {
             clearSelection()
         }
         .simultaneousGesture(edgeBackGesture)
+        .alert("新建文件夹", isPresented: $isCreateFolderDialogPresented) {
+            TextField("文件夹名称", text: $newFolderName)
+                .autocorrectionDisabled()
+            Button("取消", role: .cancel) {}
+            Button("创建") {
+                createFolderAction(newFolderName, uploadDestinationPath)
+            }
+            .disabled(newFolderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("将在当前目录中创建文件夹。")
+        }
         .alert("重命名", isPresented: renameDialogBinding) {
             TextField("新文件名", text: $renameText)
                 .autocorrectionDisabled()
@@ -327,21 +335,6 @@ struct FileBrowserView: View {
 
     private var selectedItems: [SynologyFileItem] {
         visibleItems.filter { selectedItemIDs.contains($0.id) }
-    }
-
-    private var canShowUpButton: Bool {
-        selectedTab == .files || !favoriteCurrentPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private var canGoUpInSelectedTab: Bool {
-        switch selectedTab {
-        case .files:
-            return canGoUp
-        case .favorites:
-            return !favoriteCurrentPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .cinema, .settings:
-            return false
-        }
     }
 
     private var canGoBackInSelectedTab: Bool {
@@ -822,6 +815,7 @@ private struct SettingsView: View {
     let serverURLString: String
     let account: String
     let uploadProgressItems: [UploadProgressItem]
+    let retryUploadAction: (UUID) -> Void
     @Binding var allowsInsecureConnections: Bool
     @Binding var cinemaLibraryFolders: [CinemaLibraryFolder]
     let isCinemaSyncing: Bool
@@ -840,13 +834,16 @@ private struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("连接安全") {
-                Toggle("允许不安全访问", isOn: $allowsInsecureConnections)
-                    .tint(.orange)
-
-                Text("仅在服务器证书过期等情况下临时开启。开启后，HTTPS 连接可能被窃听或篡改。")
-                    .font(.footnote)
-                    .foregroundStyle(allowsInsecureConnections ? .orange : .secondary)
+            Section("搜索") {
+                NavigationLink {
+                    AdvancedSearchView(
+                        loadFoldersAction: loadSearchFoldersAction,
+                        searchAction: searchAction,
+                        previewAction: previewAction
+                    )
+                } label: {
+                    Label("高级搜索", systemImage: "doc.text.magnifyingglass")
+                }
             }
 
             Section("影院") {
@@ -885,21 +882,9 @@ private struct SettingsView: View {
                 }
             }
 
-            Section("搜索") {
-                NavigationLink {
-                    AdvancedSearchView(
-                        loadFoldersAction: loadSearchFoldersAction,
-                        searchAction: searchAction,
-                        previewAction: previewAction
-                    )
-                } label: {
-                    Label("高级搜索", systemImage: "doc.text.magnifyingglass")
-                }
-            }
-
             Section("任务") {
                 NavigationLink {
-                    UploadProgressListView(items: uploadProgressItems)
+                    UploadProgressListView(items: uploadProgressItems, retryAction: retryUploadAction)
                 } label: {
                     HStack {
                         Label("上传进度", systemImage: "arrow.up.circle")
@@ -908,6 +893,23 @@ private struct SettingsView: View {
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
+                }
+            }
+
+            Section("连接安全") {
+                Toggle("允许不安全访问", isOn: $allowsInsecureConnections)
+                    .tint(.orange)
+
+                Text("仅在服务器证书过期等情况下临时开启。开启后，HTTPS 连接可能被窃听或篡改。")
+                    .font(.footnote)
+                    .foregroundStyle(allowsInsecureConnections ? .orange : .secondary)
+            }
+
+            Section("存储") {
+                NavigationLink {
+                    LocalTemporaryFilesView(uploadProgressItems: uploadProgressItems)
+                } label: {
+                    Label("本地临时文件", systemImage: "externaldrive")
                 }
             }
 
@@ -939,8 +941,284 @@ private struct SettingsView: View {
     }
 }
 
+private struct LocalTemporaryFilesView: View {
+    let uploadProgressItems: [UploadProgressItem]
+
+    @State private var items: [LocalTemporaryFileItem] = []
+    @State private var showsClearConfirmation = false
+    @State private var cleanupMessage: String?
+
+    var body: some View {
+        List {
+            Section {
+                LabeledContent("文件数量", value: "\(items.count)")
+                LabeledContent("占用空间", value: formattedSize(totalSize))
+            } footer: {
+                Text("这里只显示 Synology View 创建的临时文件，不会操作系统或其他应用的数据。正在上传的文件会受到保护。")
+            }
+
+            Section("文件") {
+                if items.isEmpty {
+                    ContentUnavailableView("没有临时文件", systemImage: "checkmark.circle")
+                } else {
+                    ForEach(items) { item in
+                        temporaryFileRow(item)
+                    }
+                    .onDelete(perform: deleteItems)
+                }
+            }
+
+            if !items.isEmpty {
+                Section {
+                    Button("清理全部临时文件", systemImage: "trash", role: .destructive) {
+                        showsClearConfirmation = true
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("本地临时文件")
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable {
+            reload()
+        }
+        .task {
+            reload()
+        }
+        .confirmationDialog(
+            "清理全部临时文件？",
+            isPresented: $showsClearConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("清理", role: .destructive) {
+                clearAll()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("上传失败后用于重试的文件也会被删除；正在上传的文件不会被删除。")
+        }
+        .alert("清理结果", isPresented: Binding(
+            get: { cleanupMessage != nil },
+            set: { if !$0 { cleanupMessage = nil } }
+        )) {
+            Button("好") {
+                cleanupMessage = nil
+            }
+        } message: {
+            Text(cleanupMessage ?? "")
+        }
+    }
+
+    private var totalSize: Int64 {
+        items.reduce(0) { $0 + $1.size }
+    }
+
+    private var protectedPaths: Set<String> {
+        var paths = Set<String>()
+        for item in uploadProgressItems where item.status == .queued || item.status == .uploading {
+            paths.insert(
+                FileManager.default.temporaryDirectory
+                    .appendingPathComponent("SynologyViewMultipart-\(item.id.uuidString).body")
+                    .standardizedFileURL.path
+            )
+            if let sourceFilePath = item.sourceFilePath {
+                paths.insert(
+                    URL(fileURLWithPath: sourceFilePath)
+                        .deletingLastPathComponent()
+                        .standardizedFileURL.path
+                )
+            }
+        }
+        return paths
+    }
+
+    @ViewBuilder
+    private func temporaryFileRow(_ item: LocalTemporaryFileItem) -> some View {
+        let isProtected = isProtected(item)
+        HStack(spacing: 12) {
+            Image(systemName: "doc")
+                .foregroundStyle(isProtected ? .orange : .secondary)
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.displayName)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(isProtected ? "正在使用 · \(formattedSize(item.size))" : formattedSize(item.size))
+                    .font(.caption)
+                    .foregroundStyle(isProtected ? .orange : .secondary)
+            }
+        }
+        .deleteDisabled(isProtected)
+    }
+
+    private func reload() {
+        items = LocalTemporaryFileStore.loadItems()
+    }
+
+    private func deleteItems(at offsets: IndexSet) {
+        let candidates = offsets.map { items[$0] }
+            .filter { !isProtected($0) }
+        let failureCount = LocalTemporaryFileStore.remove(candidates)
+        reload()
+        if failureCount > 0 {
+            cleanupMessage = "有 \(failureCount) 个项目未能删除，请稍后重试。"
+        }
+    }
+
+    private func clearAll() {
+        let candidates = items.filter { !isProtected($0) }
+        let protectedCount = items.count - candidates.count
+        let failureCount = LocalTemporaryFileStore.remove(candidates)
+        reload()
+
+        if failureCount > 0 {
+            cleanupMessage = "有 \(failureCount) 个项目未能删除，请稍后重试。"
+        } else if protectedCount > 0 {
+            cleanupMessage = "已清理可删除文件；保留了 \(protectedCount) 个正在使用的项目。"
+        } else {
+            cleanupMessage = "临时文件已全部清理。"
+        }
+    }
+
+    private func formattedSize(_ size: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+    }
+
+    private func isProtected(_ item: LocalTemporaryFileItem) -> Bool {
+        let itemPath = item.url.standardizedFileURL.path
+        return protectedPaths.contains { protectedPath in
+            itemPath == protectedPath || itemPath.hasPrefix(protectedPath + "/")
+        }
+    }
+}
+
+private struct LocalTemporaryFileItem: Identifiable {
+    let url: URL
+    let size: Int64
+
+    var id: String { url.standardizedFileURL.path }
+    var displayName: String { url.lastPathComponent }
+}
+
+private enum LocalTemporaryFileStore {
+    private static let containerDirectoryNames = ["SynologyViewUploads", "SynologyViewPhotoPicker"]
+    private static let rootPrefixes = ["SynologyViewMultipart-", "SynologyViewQuickLook-"]
+
+    static func loadItems() -> [LocalTemporaryFileItem] {
+        let fileManager = FileManager.default
+        let temporaryDirectory = fileManager.temporaryDirectory
+        var fileURLs: [URL] = []
+
+        if let rootContents = try? fileManager.contentsOfDirectory(
+            at: temporaryDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for url in rootContents where rootPrefixes.contains(where: { url.lastPathComponent.hasPrefix($0) }) {
+                fileURLs.append(contentsOf: regularFiles(at: url))
+            }
+        }
+
+        for directoryName in containerDirectoryNames {
+            let directory = temporaryDirectory.appendingPathComponent(directoryName, isDirectory: true)
+            if let children = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) {
+                for child in children {
+                    fileURLs.append(contentsOf: regularFiles(at: child))
+                }
+            }
+        }
+
+        return fileURLs.map { url in
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+            return LocalTemporaryFileItem(
+                url: url,
+                size: Int64(values?.fileSize ?? 0)
+            )
+        }
+        .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+    }
+
+    static func remove(_ items: [LocalTemporaryFileItem]) -> Int {
+        let fileManager = FileManager.default
+        var failureCount = 0
+        for item in items {
+            do {
+                try fileManager.removeItem(at: item.url)
+            } catch {
+                failureCount += 1
+            }
+        }
+
+        removeEmptyManagedDirectories()
+        return failureCount
+    }
+
+    private static func regularFiles(at url: URL) -> [URL] {
+        let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
+        if values?.isRegularFile == true {
+            return [url]
+        }
+        guard values?.isDirectory == true else { return [] }
+
+        guard let enumerator = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var files: [URL] = []
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
+                  values.isRegularFile == true else { continue }
+            files.append(fileURL)
+        }
+        return files
+    }
+
+    private static func removeEmptyManagedDirectories() {
+        let fileManager = FileManager.default
+        let temporaryDirectory = fileManager.temporaryDirectory
+        var managedDirectories = containerDirectoryNames.map {
+            temporaryDirectory.appendingPathComponent($0, isDirectory: true)
+        }
+        if let rootContents = try? fileManager.contentsOfDirectory(
+            at: temporaryDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            managedDirectories.append(contentsOf: rootContents.filter {
+                $0.lastPathComponent.hasPrefix("SynologyViewQuickLook-")
+            })
+        }
+
+        for root in managedDirectories {
+            guard let enumerator = fileManager.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            let directories = (enumerator.allObjects as? [URL] ?? [])
+                .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+                .sorted { $0.path.count > $1.path.count }
+            for directory in directories + [root] {
+                guard let contents = try? fileManager.contentsOfDirectory(atPath: directory.path),
+                      contents.isEmpty else { continue }
+                try? fileManager.removeItem(at: directory)
+            }
+        }
+    }
+}
+
 private struct UploadProgressListView: View {
     let items: [UploadProgressItem]
+    let retryAction: (UUID) -> Void
 
     var body: some View {
         List {
@@ -948,7 +1226,7 @@ private struct UploadProgressListView: View {
                 ContentUnavailableView("没有上传任务", systemImage: "arrow.up.circle")
             } else {
                 ForEach(items) { item in
-                    UploadProgressRow(item: item)
+                    UploadProgressRow(item: item, retryAction: retryAction)
                 }
             }
         }
@@ -960,6 +1238,7 @@ private struct UploadProgressListView: View {
 
 private struct UploadProgressRow: View {
     let item: UploadProgressItem
+    let retryAction: (UUID) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -996,6 +1275,16 @@ private struct UploadProgressRow: View {
                 Text(errorMessage)
                     .font(.caption)
                     .foregroundStyle(.red)
+            }
+
+            if item.status == .failed {
+                Button {
+                    retryAction(item.id)
+                } label: {
+                    Label("重新上传", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
         .padding(.vertical, 4)

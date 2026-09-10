@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 enum CinemaLibraryKind: String, Codable, CaseIterable, Identifiable {
     case movies
@@ -229,20 +230,47 @@ struct CinemaLibraryCacheStore {
     private let defaults = UserDefaults.standard
 
     func load(serverURLString: String, account: String) -> CinemaLibraryCache? {
-        guard let data = defaults.data(forKey: key(serverURLString: serverURLString, account: account)) else {
-            return nil
+        let defaultsKey = key(serverURLString: serverURLString, account: account)
+        let fileURL = cacheFileURL(serverURLString: serverURLString, account: account)
+        if let data = try? Data(contentsOf: fileURL),
+           let cache = try? JSONDecoder().decode(CinemaLibraryCache.self, from: data) {
+            return cache
         }
-        return try? JSONDecoder().decode(CinemaLibraryCache.self, from: data)
+
+        guard let legacyData = defaults.data(forKey: defaultsKey),
+              let cache = try? JSONDecoder().decode(CinemaLibraryCache.self, from: legacyData) else { return nil }
+        if (try? persist(legacyData, to: fileURL)) != nil {
+            defaults.removeObject(forKey: defaultsKey)
+        }
+        return cache
     }
 
     func save(_ items: [CinemaScannedItem], serverURLString: String, account: String) {
         let cache = CinemaLibraryCache(updatedAt: Date(), items: items)
         guard let data = try? JSONEncoder().encode(cache) else { return }
-        defaults.set(data, forKey: key(serverURLString: serverURLString, account: account))
+        if (try? persist(data, to: cacheFileURL(serverURLString: serverURLString, account: account))) != nil {
+            defaults.removeObject(forKey: key(serverURLString: serverURLString, account: account))
+        }
     }
 
     private func key(serverURLString: String, account: String) -> String {
         "synology.cinemaCache.\(serverURLString).\(account)"
+    }
+
+    private func cacheFileURL(serverURLString: String, account: String) -> URL {
+        let identity = Data("\(serverURLString)\n\(account)".utf8)
+        let fileName = SHA256.hash(data: identity).map { String(format: "%02x", $0) }.joined() + ".json"
+        return cacheDirectory.appendingPathComponent(fileName)
+    }
+
+    private var cacheDirectory: URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("CinemaLibrary", isDirectory: true)
+    }
+
+    private func persist(_ data: Data, to fileURL: URL) throws {
+        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        try data.write(to: fileURL, options: .atomic)
     }
 }
 
