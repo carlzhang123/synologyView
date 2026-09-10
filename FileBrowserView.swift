@@ -695,9 +695,11 @@ private struct BrowserListView: View {
 
     private var gridColumns: [GridItem] {
         [
-            GridItem(.flexible(minimum: 0), spacing: 12),
-            GridItem(.flexible(minimum: 0), spacing: 12),
-            GridItem(.flexible(minimum: 0), spacing: 12)
+            GridItem(
+                .adaptive(minimum: 104, maximum: 160),
+                spacing: 12,
+                alignment: .top
+            )
         ]
     }
 
