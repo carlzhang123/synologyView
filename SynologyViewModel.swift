@@ -81,11 +81,11 @@ final class SynologyViewModel {
     }
 
     var canGoBack: Bool {
-        !pathHistory.isEmpty
+        !pathHistory.isEmpty || !normalizedPath(currentPath).isEmpty
     }
 
     var canGoFavoriteBack: Bool {
-        !favoritePathHistory.isEmpty
+        !favoritePathHistory.isEmpty || !normalizedPath(favoriteCurrentPath).isEmpty
     }
 
     func login() async {
@@ -239,19 +239,39 @@ final class SynologyViewModel {
     }
 
     func goBack() async {
-        guard let previousPath = pathHistory.last else {
+        guard !isLoading else {
             return
         }
-
-        await navigateFiles(to: previousPath, recordsHistory: false)
+        let current = normalizedPath(currentPath)
+        guard !current.isEmpty else { return }
+        let targetPath = pathHistory.last ?? parentPath(for: current)
+        await navigateFiles(to: targetPath, recordsHistory: false)
     }
 
     func goFavoriteBack() async {
-        guard let previousPath = favoritePathHistory.last else {
+        guard !isLoading else {
             return
         }
+        let current = normalizedPath(favoriteCurrentPath)
+        guard !current.isEmpty else { return }
+        let targetPath = favoritePathHistory.last ?? parentPath(for: current)
+        await navigateFavorites(to: targetPath, recordsHistory: false)
+    }
 
-        await navigateFavorites(to: previousPath, recordsHistory: false)
+    func returnToFileRoot() async {
+        guard !isLoading, !normalizedPath(currentPath).isEmpty else { return }
+        await navigateFiles(to: "", recordsHistory: false)
+        if normalizedPath(currentPath).isEmpty {
+            pathHistory.removeAll()
+        }
+    }
+
+    func returnToFavoriteRoot() async {
+        guard !isLoading, !normalizedPath(favoriteCurrentPath).isEmpty else { return }
+        await navigateFavorites(to: "", recordsHistory: false)
+        if normalizedPath(favoriteCurrentPath).isEmpty {
+            favoritePathHistory.removeAll()
+        }
     }
 
     private func navigateFiles(to path: String, recordsHistory: Bool, historyPath: String? = nil) async {
@@ -262,7 +282,7 @@ final class SynologyViewModel {
 
             if recordsHistory {
                 pathHistory.append(historyPath ?? normalizedPath(currentPath))
-            } else {
+            } else if !pathHistory.isEmpty {
                 pathHistory.removeLast()
             }
 
@@ -289,7 +309,7 @@ final class SynologyViewModel {
 
             if recordsHistory {
                 favoritePathHistory.append(historyPath ?? normalizedPath(favoriteCurrentPath))
-            } else {
+            } else if !favoritePathHistory.isEmpty {
                 favoritePathHistory.removeLast()
             }
 

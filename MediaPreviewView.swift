@@ -367,6 +367,10 @@ private struct VideoPreview: View {
     @State private var currentPlaybackURL: URL?
     @State private var failedVLCPlaybackURLs = Set<URL>()
     @State private var hasCompletedPlayback = false
+    @State private var playbackRate: Float = 1
+    @State private var rateBeforeLongPress: Float = 1
+    @State private var isLongPressSpeedActive = false
+    @State private var isLongPressSpeedLocked = false
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -417,7 +421,10 @@ private struct VideoPreview: View {
                 doubleTapAction: toggleAspectFill,
                 scrubChangedAction: handleScrubChanged,
                 scrubEndedAction: handleScrubEnded,
-                scrubCancelledAction: cancelScrubbing
+                scrubCancelledAction: cancelScrubbing,
+                longPressBeganAction: beginTemporaryDoubleSpeed,
+                longPressLockChangedAction: updateTemporaryDoubleSpeedLock,
+                longPressEndedAction: endTemporaryDoubleSpeed
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea()
@@ -433,6 +440,12 @@ private struct VideoPreview: View {
             if let playbackErrorMessage {
                 VideoPlaybackErrorView(message: playbackErrorMessage)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            if isLongPressSpeedActive {
+                VideoPlaybackRateOverlay(isLocked: isLongPressSpeedLocked)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
             }
 
         }
@@ -451,6 +464,7 @@ private struct VideoPreview: View {
                     duration: resolvedDuration(),
                     isPlaying: isPlaying,
                     isSeekable: isCurrentPlaybackSeekable,
+                    playbackRate: playbackRate,
                     playPauseAction: {
                         togglePlayback()
                     },
@@ -462,12 +476,13 @@ private struct VideoPreview: View {
                     },
                     editingChangedAction: { isEditing in
                         isDraggingControlBar = isEditing
-                    }
+                    },
+                    playbackRateAction: setPlaybackRate
                 )
                 .transition(.opacity)
             }
         }
-        .statusBarHidden()
+        .statusBarHidden(!showsControls)
         .onAppear {
             configureVideoAudioSession()
             startAudioInterruptionObservation()
@@ -614,7 +629,7 @@ private struct VideoPreview: View {
 
         addProgressObserver(to: player)
         self.player = player
-        player.play()
+        player.playImmediately(atRate: playbackRate)
         isPlaying = true
     }
 
@@ -1016,7 +1031,7 @@ private struct VideoPreview: View {
             player.pause()
             isPlaying = false
         } else {
-            player.play()
+            player.playImmediately(atRate: playbackRate)
             isPlaying = true
         }
     }
@@ -1025,6 +1040,44 @@ private struct VideoPreview: View {
         withAnimation(.easeInOut(duration: 0.18)) {
             showsControls.toggle()
         }
+    }
+
+    private func setPlaybackRate(_ rate: Float) {
+        guard [1, 1.5, 2, 3].contains(rate) else { return }
+        syncLocalPlaybackClock(to: currentTime)
+        playbackRate = rate
+        if usesVLCFallback {
+            vlcController.setRate(rate)
+        } else {
+            player?.defaultRate = rate
+            if isPlaying {
+                player?.rate = rate
+            }
+        }
+    }
+
+    private func beginTemporaryDoubleSpeed() {
+        guard isPlaying, !isLongPressSpeedActive else { return }
+        rateBeforeLongPress = playbackRate
+        isLongPressSpeedActive = true
+        isLongPressSpeedLocked = false
+        setPlaybackRate(2)
+    }
+
+    private func updateTemporaryDoubleSpeedLock(_ isLocked: Bool) {
+        guard isLongPressSpeedActive, isLocked != isLongPressSpeedLocked else { return }
+        isLongPressSpeedLocked = isLocked
+        if isLocked {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+    }
+
+    private func endTemporaryDoubleSpeed() {
+        guard isLongPressSpeedActive else { return }
+        let shouldKeepDoubleSpeed = isLongPressSpeedLocked
+        isLongPressSpeedActive = false
+        isLongPressSpeedLocked = false
+        setPlaybackRate(shouldKeepDoubleSpeed ? 2 : rateBeforeLongPress)
     }
 
     private func toggleAspectFill() {
@@ -1330,7 +1383,9 @@ private struct VideoPreview: View {
                 }
 
                 let elapsed = Date().timeIntervalSince(localPlaybackClockAnchorDate)
-                let displayTime = clampedPlaybackTime(localPlaybackClockAnchorTime + max(elapsed, 0))
+                let displayTime = clampedPlaybackTime(
+                    localPlaybackClockAnchorTime + max(elapsed, 0) * Double(playbackRate)
+                )
                 currentTime = displayTime
                 if !hasCompletedPlayback, displayTime > 1 {
                     saveProgressIfNeeded(displayTime)
@@ -1582,6 +1637,9 @@ private struct VideoGestureCaptureLayer: UIViewRepresentable {
     let scrubChangedAction: (CGFloat) -> Void
     let scrubEndedAction: (CGFloat) -> Void
     let scrubCancelledAction: () -> Void
+    let longPressBeganAction: () -> Void
+    let longPressLockChangedAction: (Bool) -> Void
+    let longPressEndedAction: () -> Void
 
     func makeUIView(context: Context) -> VideoGestureCaptureUIView {
         let view = VideoGestureCaptureUIView()
@@ -1598,6 +1656,9 @@ private struct VideoGestureCaptureLayer: UIViewRepresentable {
         uiView.scrubChangedAction = scrubChangedAction
         uiView.scrubEndedAction = scrubEndedAction
         uiView.scrubCancelledAction = scrubCancelledAction
+        uiView.longPressBeganAction = longPressBeganAction
+        uiView.longPressLockChangedAction = longPressLockChangedAction
+        uiView.longPressEndedAction = longPressEndedAction
     }
 }
 
@@ -1610,6 +1671,9 @@ private final class VideoGestureCaptureUIView: UIView {
     var scrubChangedAction: (CGFloat) -> Void = { _ in }
     var scrubEndedAction: (CGFloat) -> Void = { _ in }
     var scrubCancelledAction: () -> Void = {}
+    var longPressBeganAction: () -> Void = {}
+    var longPressLockChangedAction: (Bool) -> Void = { _ in }
+    var longPressEndedAction: () -> Void = {}
     private lazy var gestureHandler = VideoPlaybackGestureHandler(
         panOffset: { [weak self] in self?.panOffset ?? .zero },
         allowsViewportPan: { [weak self] in self?.allowsViewportPan == true },
@@ -1621,7 +1685,10 @@ private final class VideoGestureCaptureUIView: UIView {
         toggleAspectFillAction: { [weak self] in self?.doubleTapAction() },
         scrubChangedAction: { [weak self] translation in self?.scrubChangedAction(translation) },
         scrubEndedAction: { [weak self] translation in self?.scrubEndedAction(translation) },
-        scrubCancelledAction: { [weak self] in self?.scrubCancelledAction() }
+        scrubCancelledAction: { [weak self] in self?.scrubCancelledAction() },
+        longPressBeganAction: { [weak self] in self?.longPressBeganAction() },
+        longPressLockChangedAction: { [weak self] isLocked in self?.longPressLockChangedAction(isLocked) },
+        longPressEndedAction: { [weak self] in self?.longPressEndedAction() }
     )
 
     override init(frame: CGRect) {
@@ -1717,19 +1784,22 @@ private final class VLCPlaybackController {
     private var stopAction: () -> Void = {}
     private var seekAction: (TimeInterval) -> Void = { _ in }
     private var restartAction: (TimeInterval) -> Void = { _ in }
+    private var setRateAction: (Float) -> Void = { _ in }
 
     func configure(
         playAction: @escaping () -> Void,
         pauseAction: @escaping () -> Void,
         stopAction: @escaping () -> Void,
         seekAction: @escaping (TimeInterval) -> Void,
-        restartAction: @escaping (TimeInterval) -> Void
+        restartAction: @escaping (TimeInterval) -> Void,
+        setRateAction: @escaping (Float) -> Void
     ) {
         self.playAction = playAction
         self.pauseAction = pauseAction
         self.stopAction = stopAction
         self.seekAction = seekAction
         self.restartAction = restartAction
+        self.setRateAction = setRateAction
     }
 
     func play() {
@@ -1752,12 +1822,17 @@ private final class VLCPlaybackController {
         restartAction(seconds)
     }
 
+    func setRate(_ rate: Float) {
+        setRateAction(rate)
+    }
+
     func reset() {
         playAction = {}
         pauseAction = {}
         stopAction = {}
         seekAction = { _ in }
         restartAction = { _ in }
+        setRateAction = { _ in }
     }
 }
 
@@ -1797,6 +1872,9 @@ private struct VLCVideoPlayerSurface: UIViewRepresentable {
             },
             restartAction: { [weak view] seconds in
                 view?.restartPlayback(at: seconds)
+            },
+            setRateAction: { [weak view] rate in
+                view?.setPlaybackRate(rate)
             }
         )
         view.isAspectFill = isAspectFill
@@ -1832,6 +1910,9 @@ private struct VLCVideoPlayerSurface: UIViewRepresentable {
             },
             restartAction: { [weak uiView] seconds in
                 uiView?.restartPlayback(at: seconds)
+            },
+            setRateAction: { [weak uiView] rate in
+                uiView?.setPlaybackRate(rate)
             }
         )
         uiView.isAspectFill = isAspectFill
@@ -1982,6 +2063,10 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
     func pausePlayback() {
         mediaPlayer.pause()
         publishState()
+    }
+
+    func setPlaybackRate(_ rate: Float) {
+        mediaPlayer.rate = rate
     }
 
     func stopPlayback() {
@@ -2545,9 +2630,14 @@ private final class VideoPlaybackGestureHandler: NSObject, UIGestureRecognizerDe
     private let scrubChangedAction: (CGFloat) -> Void
     private let scrubEndedAction: (CGFloat) -> Void
     private let scrubCancelledAction: () -> Void
+    private let longPressBeganAction: () -> Void
+    private let longPressLockChangedAction: (Bool) -> Void
+    private let longPressEndedAction: () -> Void
     private var startOffset = CGSize.zero
     private var isScrubbing = false
     private var pendingSingleTapWorkItem: DispatchWorkItem?
+    private var longPressStartLocation = CGPoint.zero
+    private var isLongPressLocked = false
 
     init(
         panOffset: @escaping () -> CGSize,
@@ -2557,7 +2647,10 @@ private final class VideoPlaybackGestureHandler: NSObject, UIGestureRecognizerDe
         toggleAspectFillAction: @escaping () -> Void,
         scrubChangedAction: @escaping (CGFloat) -> Void,
         scrubEndedAction: @escaping (CGFloat) -> Void,
-        scrubCancelledAction: @escaping () -> Void
+        scrubCancelledAction: @escaping () -> Void,
+        longPressBeganAction: @escaping () -> Void = {},
+        longPressLockChangedAction: @escaping (Bool) -> Void = { _ in },
+        longPressEndedAction: @escaping () -> Void = {}
     ) {
         self.panOffset = panOffset
         self.allowsViewportPan = allowsViewportPan
@@ -2567,6 +2660,9 @@ private final class VideoPlaybackGestureHandler: NSObject, UIGestureRecognizerDe
         self.scrubChangedAction = scrubChangedAction
         self.scrubEndedAction = scrubEndedAction
         self.scrubCancelledAction = scrubCancelledAction
+        self.longPressBeganAction = longPressBeganAction
+        self.longPressLockChangedAction = longPressLockChangedAction
+        self.longPressEndedAction = longPressEndedAction
     }
 
     func install(on view: UIView) {
@@ -2586,10 +2682,16 @@ private final class VideoPlaybackGestureHandler: NSObject, UIGestureRecognizerDe
         cropPan.maximumNumberOfTouches = 2
         cropPan.delegate = self
 
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+        longPress.minimumPressDuration = 0.35
+        longPress.allowableMovement = 90
+        longPress.delegate = self
+
         view.addGestureRecognizer(singleTap)
         view.addGestureRecognizer(doubleTap)
         view.addGestureRecognizer(scrubPan)
         view.addGestureRecognizer(cropPan)
+        view.addGestureRecognizer(longPress)
     }
 
     @objc private func handleSingleTap(_ recognizer: UITapGestureRecognizer) {
@@ -2657,6 +2759,28 @@ private final class VideoPlaybackGestureHandler: NSObject, UIGestureRecognizerDe
                     height: startOffset.height + translation.y
                 )
             )
+        default:
+            break
+        }
+    }
+
+    @objc private func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
+        let location = recognizer.location(in: recognizer.view)
+        switch recognizer.state {
+        case .began:
+            longPressStartLocation = location
+            isLongPressLocked = false
+            pendingSingleTapWorkItem?.cancel()
+            longPressBeganAction()
+        case .changed:
+            let shouldLock = longPressStartLocation.y - location.y >= 64
+            if shouldLock != isLongPressLocked {
+                isLongPressLocked = shouldLock
+                longPressLockChangedAction(shouldLock)
+            }
+        case .ended, .cancelled, .failed:
+            longPressEndedAction()
+            isLongPressLocked = false
         default:
             break
         }
@@ -2783,10 +2907,12 @@ private struct VideoControlsBar: View {
     let duration: TimeInterval
     let isPlaying: Bool
     let isSeekable: Bool
+    let playbackRate: Float
     let playPauseAction: () -> Void
     let seekAction: (TimeInterval) -> Void
     let seekPreviewAction: (TimeInterval) -> Void
     let editingChangedAction: (Bool) -> Void
+    let playbackRateAction: (Float) -> Void
     @State private var sliderValue: TimeInterval = 0
     @State private var isDraggingSlider = false
 
@@ -2856,6 +2982,26 @@ private struct VideoControlsBar: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
                     .frame(minWidth: isSeekable ? 118 : 154, alignment: .trailing)
+
+                Menu {
+                    ForEach([Float(1), 1.5, 2, 3], id: \.self) { rate in
+                        Button {
+                            playbackRateAction(rate)
+                        } label: {
+                            if playbackRate == rate {
+                                Label(rateText(rate), systemImage: "checkmark")
+                            } else {
+                                Text(rateText(rate))
+                            }
+                        }
+                    }
+                } label: {
+                    Text(rateText(playbackRate))
+                        .font(.subheadline.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 42, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
             }
         }
         .padding(.horizontal, 16)
@@ -2907,6 +3053,32 @@ private struct VideoControlsBar: View {
         }
 
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func rateText(_ rate: Float) -> String {
+        rate == 1 ? "1x" : "\(rate.formatted(.number.precision(.fractionLength(0...1))))x"
+    }
+}
+
+private struct VideoPlaybackRateOverlay: View {
+    let isLocked: Bool
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: isLocked ? "lock.fill" : "forward.fill")
+                .font(.title2)
+            Text(isLocked ? "2x 已锁定" : "2x 快速播放")
+                .font(.headline)
+            if !isLocked {
+                Text("上滑锁定")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .background(.black.opacity(0.62), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 

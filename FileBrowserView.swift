@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct FileBrowserView: View {
     @Binding var currentPath: String
@@ -39,6 +40,8 @@ struct FileBrowserView: View {
     let cinemaViewingStateRevision: Int
     let backAction: () -> Void
     let favoriteBackAction: () -> Void
+    let fileRootAction: () -> Void
+    let favoriteRootAction: () -> Void
     let logoutAction: () -> Void
     let lastMoveDestinationPath: String
 
@@ -230,6 +233,14 @@ struct FileBrowserView: View {
                 serverURLString: serverURLString,
                 account: account
             )
+        }
+        .onAppear {
+            NativeTabBarTapMonitor.shared.start { index in
+                handleRepeatedTabTap(at: index)
+            }
+        }
+        .onDisappear {
+            NativeTabBarTapMonitor.shared.stop()
         }
         .onChange(of: selectedTab) {
             clearSelection()
@@ -441,6 +452,17 @@ struct FileBrowserView: View {
         }
     }
 
+    private func handleRepeatedTabTap(at index: Int) {
+        switch index {
+        case 0:
+            navigateFiles(edge: .leading, action: fileRootAction)
+        case 1:
+            navigateFavorites(edge: .leading, action: favoriteRootAction)
+        default:
+            break
+        }
+    }
+
     private func navigateFiles(edge: Edge, action: () -> Void) {
         fileTransitionEdge = edge
         action()
@@ -462,6 +484,101 @@ private enum FileBrowserTab: Hashable {
     case favorites
     case cinema
     case settings
+}
+
+@MainActor
+private final class NativeTabBarTapMonitor: NSObject, UIGestureRecognizerDelegate {
+    static let shared = NativeTabBarTapMonitor()
+
+    private var action: ((Int) -> Void)?
+    private weak var tabBar: UITabBar?
+    private var recognizer: UITapGestureRecognizer?
+    private var lastIndex: Int?
+    private var lastTapDate = Date.distantPast
+
+    func start(action: @escaping (Int) -> Void) {
+        self.action = action
+        attachIfPossible()
+        DispatchQueue.main.async { [weak self] in self?.attachIfPossible() }
+    }
+
+    func stop() {
+        if let recognizer {
+            tabBar?.removeGestureRecognizer(recognizer)
+        }
+        recognizer = nil
+        tabBar = nil
+        action = nil
+        lastIndex = nil
+        lastTapDate = .distantPast
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        true
+    }
+
+    private func attachIfPossible() {
+        let windows = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+        guard let visibleTabBar = windows.lazy.compactMap({ self.findTabBar(in: $0) }).first else { return }
+        guard tabBar !== visibleTabBar else { return }
+        stopKeepingAction()
+        tabBar = visibleTabBar
+        let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        recognizer.cancelsTouchesInView = false
+        recognizer.delegate = self
+        visibleTabBar.addGestureRecognizer(recognizer)
+        self.recognizer = recognizer
+    }
+
+    private func stopKeepingAction() {
+        if let recognizer {
+            tabBar?.removeGestureRecognizer(recognizer)
+        }
+        recognizer = nil
+        tabBar = nil
+    }
+
+    private func findTabBar(in view: UIView) -> UITabBar? {
+        if let tabBar = view as? UITabBar, !tabBar.isHidden, tabBar.alpha > 0 {
+            return tabBar
+        }
+        for subview in view.subviews {
+            if let tabBar = findTabBar(in: subview) {
+                return tabBar
+            }
+        }
+        return nil
+    }
+
+    @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended,
+                  let tabBar,
+                  let itemCount = tabBar.items?.count,
+                  itemCount > 0,
+                  tabBar.bounds.width > 0 else { return }
+
+            let location = recognizer.location(in: tabBar)
+            guard tabBar.bounds.contains(location) else { return }
+            let visualIndex = min(max(Int(location.x / tabBar.bounds.width * CGFloat(itemCount)), 0), itemCount - 1)
+            let index = tabBar.effectiveUserInterfaceLayoutDirection == .rightToLeft
+                ? itemCount - visualIndex - 1
+                : visualIndex
+            let now = Date()
+
+            if lastIndex == index, now.timeIntervalSince(lastTapDate) <= 0.7 {
+                lastIndex = nil
+                lastTapDate = .distantPast
+                action?(index)
+            } else {
+                lastIndex = index
+                lastTapDate = now
+            }
+    }
 }
 
 private enum FileDisplayMode: String, Hashable {
@@ -604,7 +721,6 @@ private struct BrowserListView: View {
                 .id(contentID)
                 .transition(.push(from: transitionEdge))
         }
-        .clipped()
         .animation(.smooth(duration: 0.32), value: contentID)
         .animation(.easeInOut(duration: 0.18), value: isSelectionMode)
     }

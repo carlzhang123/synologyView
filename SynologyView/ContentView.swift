@@ -105,6 +105,12 @@ struct ContentView: View {
                     favoriteBackAction: {
                         Task { await model.goFavoriteBack() }
                     },
+                    fileRootAction: {
+                        Task { await model.returnToFileRoot() }
+                    },
+                    favoriteRootAction: {
+                        Task { await model.returnToFavoriteRoot() }
+                    },
                     logoutAction: {
                         model.logout()
                     },
