@@ -335,6 +335,7 @@ private struct VideoPreview: View {
     let savePlaybackDuration: (TimeInterval) -> Void
     let clearPlaybackProgress: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var player: AVPlayer?
     @State private var timeObserverToken: Any?
     @State private var currentTime: TimeInterval = 0
@@ -486,6 +487,9 @@ private struct VideoPreview: View {
         .onAppear {
             configureVideoAudioSession()
             startAudioInterruptionObservation()
+        }
+        .onChange(of: scenePhase) {
+            handleScenePhaseChange(scenePhase)
         }
         .task {
             startInitialPlayback()
@@ -685,6 +689,20 @@ private struct VideoPreview: View {
         isPlaying = false
     }
 
+    private func handleScenePhaseChange(_ phase: ScenePhase) {
+        switch phase {
+        case .active:
+            configureVideoAudioSession()
+        case .inactive:
+            break
+        case .background:
+            pauseForAppDeactivation()
+            deactivateVideoAudioSession()
+        @unknown default:
+            break
+        }
+    }
+
     private func configureVideoAudioSession() {
         do {
             let audioSession = AVAudioSession.sharedInstance()
@@ -692,6 +710,14 @@ private struct VideoPreview: View {
             try audioSession.setActive(true)
         } catch {
             // Interruption handling still works when another app temporarily owns the audio session.
+        }
+    }
+
+    private func deactivateVideoAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        } catch {
+            // Another app may already own the session while the app is backgrounding.
         }
     }
 
@@ -739,6 +765,21 @@ private struct VideoPreview: View {
 
         isPlaying = false
         showsControls = true
+    }
+
+    private func pauseForAppDeactivation() {
+        guard isPlaying || player?.timeControlStatus == .playing else {
+            return
+        }
+
+        if usesVLCFallback {
+            vlcController.pause()
+            syncLocalPlaybackClock(to: currentTime)
+        } else {
+            player?.pause()
+        }
+
+        isPlaying = false
     }
 
     private func observeStatus(for item: AVPlayerItem, allowsURLFallback: Bool, allowsLocalFallback: Bool) {
@@ -1004,6 +1045,7 @@ private struct VideoPreview: View {
                     seekDisplayAnchorDate = Date()
                 }
             } else {
+                configureVideoAudioSession()
                 if isAtPlaybackEnd || vlcPlaybackState.rawState == VLCPlaybackStateRaw.ended {
                     currentTime = isAtPlaybackEnd ? 0 : currentTime
                     syncLocalPlaybackClock(to: currentTime)
@@ -1031,6 +1073,7 @@ private struct VideoPreview: View {
             player.pause()
             isPlaying = false
         } else {
+            configureVideoAudioSession()
             player.playImmediately(atRate: playbackRate)
             isPlaying = true
         }
@@ -2070,16 +2113,27 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
     }
 
     func stopPlayback() {
+        guard currentURL != nil || mediaPlayer.media != nil else {
+            return
+        }
+
         durationProbeWorkItem?.cancel()
         durationProbeWorkItem = nil
         seekRecoveryWorkItem?.cancel()
         seekRecoveryWorkItem = nil
-        mediaPlayer.stop()
-        mediaPlayer.delegate = nil
-        mediaPlayer.drawable = nil
-        mediaPlayer.media = nil
+        let stoppedPlayer = mediaPlayer
+        stoppedPlayer.pause()
+        stoppedPlayer.delegate = nil
+        stoppedPlayer.drawable = nil
         currentURL = nil
         publishState()
+
+        DispatchQueue.global(qos: .userInitiated).async { [stoppedPlayer] in
+            stoppedPlayer.stop()
+            DispatchQueue.main.async {
+                stoppedPlayer.media = nil
+            }
+        }
     }
 
     func seek(to seconds: TimeInterval) {
