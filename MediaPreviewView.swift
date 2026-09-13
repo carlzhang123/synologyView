@@ -1,4 +1,5 @@
 import AVKit
+import MediaPlayer
 import PDFKit
 import QuickLook
 import SwiftUI
@@ -7,6 +8,27 @@ import UIKit
 #if canImport(MobileVLCKit)
 import MobileVLCKit
 #endif
+
+private func videoDebugLog(_ message: String) {
+    #if DEBUG
+    print("[SynologyVideoDebug] \(message)")
+    #endif
+}
+
+private func redactedPlaybackURL(_ url: URL) -> String {
+    guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        return url.absoluteString
+    }
+
+    components.queryItems = components.queryItems?.map { item in
+        if item.name == "_sid" {
+            return URLQueryItem(name: item.name, value: "redacted")
+        }
+        return item
+    }
+
+    return components.url?.absoluteString ?? url.absoluteString
+}
 
 struct MediaPreviewView: View {
     let item: SynologyFilePreviewItem
@@ -358,6 +380,8 @@ private struct VideoPreview: View {
     @State private var vlcStartupWatchdogTask: Task<Void, Never>?
     @State private var localPlaybackClockTask: Task<Void, Never>?
     @State private var audioInterruptionTask: Task<Void, Never>?
+    @State private var wasPlayingBeforeSceneInactive = false
+    @State private var sceneResumeTask: Task<Void, Never>?
     @State private var localPlaybackClockAnchorDate = Date.distantPast
     @State private var localPlaybackClockAnchorTime: TimeInterval = 0
     @State private var hasTrustedDuration = false
@@ -372,6 +396,7 @@ private struct VideoPreview: View {
     @State private var rateBeforeLongPress: Float = 1
     @State private var isLongPressSpeedActive = false
     @State private var isLongPressSpeedLocked = false
+    @State private var hasConfiguredRemoteCommands = false
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -487,6 +512,8 @@ private struct VideoPreview: View {
         .onAppear {
             configureVideoAudioSession()
             startAudioInterruptionObservation()
+            configureNowPlayingControls()
+            updateNowPlayingInfo()
         }
         .onChange(of: scenePhase) {
             handleScenePhaseChange(scenePhase)
@@ -522,6 +549,7 @@ private struct VideoPreview: View {
             if displayTime > 1 {
                 saveProgressIfNeeded(displayTime)
             }
+            updateNowPlayingInfo()
         }
     }
 
@@ -575,13 +603,16 @@ private struct VideoPreview: View {
         playbackURLIndex = 0
         let firstURL = orderedPlaybackURLs.first ?? url
 #if canImport(MobileVLCKit)
+        videoDebugLog("\(fileName): startInitialPlayback -> VLC url=\(redactedPlaybackURL(firstURL))")
         startVLCPlayback(from: firstURL, reason: "MobileVLCKit is the default video player")
 #else
+        videoDebugLog("\(fileName): startInitialPlayback -> AVPlayer url=\(redactedPlaybackURL(firstURL))")
         startPlayback(from: firstURL, resumeFromSavedProgress: true, allowsURLFallback: true, allowsLocalFallback: true)
 #endif
     }
 
     private func startVLCPlayback(from playbackURL: URL, reason: String) {
+        videoDebugLog("\(fileName): startVLCPlayback reason=\(reason), url=\(redactedPlaybackURL(playbackURL))")
         playbackDiagnosticTask?.cancel()
         playbackDiagnosticTask = nil
         removeProgressObserver()
@@ -675,6 +706,8 @@ private struct VideoPreview: View {
         vlcStartupWatchdogTask = nil
         audioInterruptionTask?.cancel()
         audioInterruptionTask = nil
+        sceneResumeTask?.cancel()
+        sceneResumeTask = nil
         stopLocalPlaybackClock()
         clearSeekProtection()
         removeProgressObserver()
@@ -687,38 +720,186 @@ private struct VideoPreview: View {
         player = nil
         usesVLCFallback = false
         isPlaying = false
+        clearNowPlayingControls()
     }
 
     private func handleScenePhaseChange(_ phase: ScenePhase) {
+        videoDebugLog("\(fileName): scenePhase=\(phase), isPlaying=\(isPlaying), vlcState=\(vlcPlaybackState.rawState)")
+
         switch phase {
         case .active:
             configureVideoAudioSession()
+            updateNowPlayingInfo()
+            scheduleSceneResumeIfNeeded()
         case .inactive:
-            break
+            wasPlayingBeforeSceneInactive = isPlaying || vlcPlaybackState.rawState == VLCPlaybackStateRaw.playing
+            sceneResumeTask?.cancel()
+            sceneResumeTask = nil
         case .background:
-            pauseForAppDeactivation()
-            deactivateVideoAudioSession()
+            break
         @unknown default:
             break
         }
     }
 
-    private func configureVideoAudioSession() {
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playback, mode: .moviePlayback)
-            try audioSession.setActive(true)
-        } catch {
-            // Interruption handling still works when another app temporarily owns the audio session.
+    private func scheduleSceneResumeIfNeeded() {
+        guard wasPlayingBeforeSceneInactive, usesVLCFallback, !hasCompletedPlayback else {
+            wasPlayingBeforeSceneInactive = false
+            return
+        }
+
+        sceneResumeTask?.cancel()
+        sceneResumeTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled,
+                  scenePhase == .active,
+                  wasPlayingBeforeSceneInactive,
+                  usesVLCFallback,
+                  !hasCompletedPlayback else {
+                return
+            }
+
+            wasPlayingBeforeSceneInactive = false
+            if !isPlaying || vlcPlaybackState.rawState == VLCPlaybackStateRaw.paused || vlcPlaybackState.rawState == VLCPlaybackStateRaw.stopped {
+                videoDebugLog("\(fileName): resume after scene active vlcState=\(vlcPlaybackState.rawState), isPlaying=\(isPlaying)")
+                vlcController.play()
+                vlcController.setRate(playbackRate)
+                isPlaying = true
+                syncLocalPlaybackClock(to: currentTime)
+                startLocalPlaybackClockIfNeeded()
+                updateNowPlayingInfo()
+            }
         }
     }
 
-    private func deactivateVideoAudioSession() {
-        do {
-            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        } catch {
-            // Another app may already own the session while the app is backgrounding.
+    private func configureVideoAudioSession() {
+        Task.detached(priority: .utility) {
+            let audioSession = AVAudioSession.sharedInstance()
+            do {
+                try audioSession.setCategory(.playback, mode: .moviePlayback)
+                try audioSession.setActive(true)
+            } catch {
+                // Interruption handling still works when another app temporarily owns the audio session.
+            }
         }
+    }
+
+    private func configureNowPlayingControls() {
+        guard !hasConfiguredRemoteCommands else {
+            return
+        }
+
+        hasConfiguredRemoteCommands = true
+        UIApplication.shared.beginReceivingRemoteControlEvents()
+        let commandCenter = MPRemoteCommandCenter.shared()
+        commandCenter.playCommand.isEnabled = true
+        commandCenter.pauseCommand.isEnabled = true
+        commandCenter.togglePlayPauseCommand.isEnabled = true
+        commandCenter.changePlaybackPositionCommand.isEnabled = true
+
+        commandCenter.playCommand.removeTarget(nil)
+        commandCenter.pauseCommand.removeTarget(nil)
+        commandCenter.togglePlayPauseCommand.removeTarget(nil)
+        commandCenter.changePlaybackPositionCommand.removeTarget(nil)
+
+        commandCenter.playCommand.addTarget { _ in
+            Task { @MainActor in
+                playFromRemoteCommand()
+            }
+            return .success
+        }
+
+        commandCenter.pauseCommand.addTarget { _ in
+            Task { @MainActor in
+                pauseFromRemoteCommand()
+            }
+            return .success
+        }
+
+        commandCenter.togglePlayPauseCommand.addTarget { _ in
+            Task { @MainActor in
+                togglePlayback()
+            }
+            return .success
+        }
+
+        commandCenter.changePlaybackPositionCommand.addTarget { event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent else {
+                return .commandFailed
+            }
+
+            Task { @MainActor in
+                seek(to: event.positionTime)
+            }
+            return .success
+        }
+    }
+
+    private func clearNowPlayingControls() {
+        guard hasConfiguredRemoteCommands else {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            return
+        }
+
+        let commandCenter = MPRemoteCommandCenter.shared()
+        commandCenter.playCommand.removeTarget(nil)
+        commandCenter.pauseCommand.removeTarget(nil)
+        commandCenter.togglePlayPauseCommand.removeTarget(nil)
+        commandCenter.changePlaybackPositionCommand.removeTarget(nil)
+        commandCenter.changePlaybackPositionCommand.isEnabled = false
+        hasConfiguredRemoteCommands = false
+        UIApplication.shared.endReceivingRemoteControlEvents()
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
+
+    private func updateNowPlayingInfo() {
+        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+        let resolvedDuration = resolvedDuration()
+        info[MPMediaItemPropertyTitle] = fileName
+        info[MPMediaItemPropertyMediaType] = NSNumber(value: MPMediaType.movie.rawValue)
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = max(currentTime, 0)
+        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? NSNumber(value: playbackRate) : 0
+        info[MPNowPlayingInfoPropertyDefaultPlaybackRate] = NSNumber(value: playbackRate)
+        if resolvedDuration > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = resolvedDuration
+        }
+
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private func playFromRemoteCommand() {
+        guard !isPlaying else {
+            updateNowPlayingInfo()
+            return
+        }
+
+        configureVideoAudioSession()
+        if usesVLCFallback {
+            vlcController.play()
+            vlcController.setRate(playbackRate)
+        } else {
+            player?.playImmediately(atRate: playbackRate)
+        }
+        isPlaying = true
+        syncLocalPlaybackClock(to: currentTime)
+        startLocalPlaybackClockIfNeeded()
+        updateNowPlayingInfo()
+    }
+
+    private func pauseFromRemoteCommand() {
+        guard isPlaying || player?.timeControlStatus == .playing else {
+            updateNowPlayingInfo()
+            return
+        }
+
+        if usesVLCFallback {
+            vlcController.pause()
+            syncLocalPlaybackClock(to: currentTime)
+        } else {
+            player?.pause()
+        }
+        isPlaying = false
+        updateNowPlayingInfo()
     }
 
     private func startAudioInterruptionObservation() {
@@ -743,9 +924,12 @@ private struct VideoPreview: View {
 
         switch type {
         case .began:
+            videoDebugLog("\(fileName): audio interruption began scenePhase=\(scenePhase), isPlaying=\(isPlaying), vlcState=\(vlcPlaybackState.rawState)")
             pauseForAudioInterruption()
         case .ended:
+            videoDebugLog("\(fileName): audio interruption ended scenePhase=\(scenePhase), isPlaying=\(isPlaying), vlcState=\(vlcPlaybackState.rawState)")
             configureVideoAudioSession()
+            updateNowPlayingInfo()
         @unknown default:
             break
         }
@@ -753,6 +937,7 @@ private struct VideoPreview: View {
 
     private func pauseForAudioInterruption() {
         guard isPlaying || player?.timeControlStatus == .playing else {
+            updateNowPlayingInfo()
             return
         }
 
@@ -765,21 +950,7 @@ private struct VideoPreview: View {
 
         isPlaying = false
         showsControls = true
-    }
-
-    private func pauseForAppDeactivation() {
-        guard isPlaying || player?.timeControlStatus == .playing else {
-            return
-        }
-
-        if usesVLCFallback {
-            vlcController.pause()
-            syncLocalPlaybackClock(to: currentTime)
-        } else {
-            player?.pause()
-        }
-
-        isPlaying = false
+        updateNowPlayingInfo()
     }
 
     private func observeStatus(for item: AVPlayerItem, allowsURLFallback: Bool, allowsLocalFallback: Bool) {
@@ -986,6 +1157,7 @@ private struct VideoPreview: View {
             acceptPlaybackDuration(player.currentItem?.duration.seconds ?? 0)
             isPlaying = player.timeControlStatus == .playing
             saveProgressIfNeeded(seconds)
+            updateNowPlayingInfo()
         }
     }
 
@@ -1062,6 +1234,7 @@ private struct VideoPreview: View {
                     seekDisplayAnchorDate = Date()
                 }
             }
+            updateNowPlayingInfo()
             return
         }
 
@@ -1077,6 +1250,7 @@ private struct VideoPreview: View {
             player.playImmediately(atRate: playbackRate)
             isPlaying = true
         }
+        updateNowPlayingInfo()
     }
 
     private func toggleControls() {
@@ -1097,6 +1271,7 @@ private struct VideoPreview: View {
                 player?.rate = rate
             }
         }
+        updateNowPlayingInfo()
     }
 
     private func beginTemporaryDoubleSpeed() {
@@ -1188,6 +1363,7 @@ private struct VideoPreview: View {
             saveProgressIfNeeded(targetTime)
             isSeeking = false
             isDraggingControlBar = false
+            updateNowPlayingInfo()
             return
         }
 
@@ -1212,6 +1388,7 @@ private struct VideoPreview: View {
             }
         }
         saveProgressIfNeeded(targetTime)
+        updateNowPlayingInfo()
     }
 
     private func seekDuringScrub(to seconds: TimeInterval) {
@@ -1223,6 +1400,7 @@ private struct VideoPreview: View {
         if usesVLCFallback {
             currentTime = targetTime
             isSeeking = true
+            updateNowPlayingInfo()
             return
         }
 
@@ -1232,6 +1410,8 @@ private struct VideoPreview: View {
 
         let time = CMTime(seconds: targetTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+        currentTime = targetTime
+        updateNowPlayingInfo()
     }
 
     private func seekPreview(from horizontalTranslation: CGFloat) -> VideoScrubPreview? {
@@ -1464,22 +1644,20 @@ private struct VideoPreview: View {
             return
         }
 
-        if isTransportStreamFile {
-            switch state.rawState {
-            case VLCPlaybackStateRaw.playing:
-                if !isPlaying {
-                    isPlaying = true
-                    syncLocalPlaybackClock(to: currentTime)
-                    startLocalPlaybackClockIfNeeded()
-                }
-            case VLCPlaybackStateRaw.paused, VLCPlaybackStateRaw.ended:
-                if isPlaying {
-                    isPlaying = false
-                    syncLocalPlaybackClock(to: currentTime)
-                }
-            default:
-                break
+        switch state.rawState {
+        case VLCPlaybackStateRaw.playing:
+            if !isPlaying {
+                isPlaying = true
+                syncLocalPlaybackClock(to: currentTime)
+                startLocalPlaybackClockIfNeeded()
             }
+        case VLCPlaybackStateRaw.paused:
+            if isPlaying {
+                isPlaying = false
+                syncLocalPlaybackClock(to: currentTime)
+            }
+        default:
+            break
         }
 
         if state.rawState == VLCPlaybackStateRaw.error {
@@ -1987,6 +2165,7 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
     private var bestDuration: TimeInterval = 0
     private var durationUpperBound: TimeInterval?
     private var lastKnownVideoSize = CGSize.zero
+    private var lastLoggedPlaybackState = VLCPlaybackStateRaw.unknown
     var stateChanged: ((VLCPlaybackState) -> Void)?
     var knownDuration: TimeInterval = 0 {
         didSet {
@@ -2063,6 +2242,7 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
             return
         }
 
+        videoDebugLog("VLC view play url=\(redactedPlaybackURL(url)), resume=\(resumeTime)s")
         currentURL = url
         durationProbeWorkItem?.cancel()
         seekRecoveryWorkItem?.cancel()
@@ -2070,11 +2250,13 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
         bestDuration = knownDuration.isFinite && knownDuration > 0 ? knownDuration : 0
         durationUpperBound = nil
         lastKnownVideoSize = .zero
+        lastLoggedPlaybackState = VLCPlaybackStateRaw.unknown
         panOffset = .zero
         layoutVideoView(animated: false)
         mediaPlayer.stop()
         configureMedia(for: url)
         mediaPlayer.play()
+        videoDebugLog("VLC mediaPlayer.play called state=\(mediaPlayer.state.rawValue), isPlaying=\(mediaPlayer.isPlaying)")
         if resumeTime > 1 {
             seek(to: resumeTime)
         }
@@ -2083,6 +2265,7 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
 
     func resumePlayback() {
         mediaPlayer.play()
+        videoDebugLog("VLC resumePlayback state=\(mediaPlayer.state.rawValue), isPlaying=\(mediaPlayer.isPlaying)")
         publishState()
     }
 
@@ -2173,7 +2356,18 @@ private final class VLCVideoPlayerUIView: UIView, VLCMediaPlayerDelegate {
         if rememberVideoSizeIfAvailable(), isAspectFill {
             layoutVideoView(animated: true)
         }
+        logPlaybackStateChangeIfNeeded()
         publishState()
+    }
+
+    private func logPlaybackStateChangeIfNeeded() {
+        let state = mediaPlayer.state.rawValue
+        guard state != lastLoggedPlaybackState else {
+            return
+        }
+
+        lastLoggedPlaybackState = state
+        videoDebugLog("VLC stateChanged state=\(state), isPlaying=\(mediaPlayer.isPlaying), time=\(seconds(from: mediaPlayer.time))s, duration=\(resolvedDuration())s")
     }
 
     private func publishState(currentTime explicitCurrentTime: TimeInterval? = nil) {

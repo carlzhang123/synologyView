@@ -540,7 +540,9 @@ private struct CinemaMediaRow: View {
     }
 
     private var isInProgress: Bool {
-        progress > 1 && (duration <= 0 || progress < duration - 20)
+        !viewingState.isWatched &&
+            progress > 1 &&
+            (duration <= 0 || progress < duration - 20)
     }
 
     private var displayTitle: String {
