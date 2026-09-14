@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>用于将群晖中的图片保存到您的照片图库。</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

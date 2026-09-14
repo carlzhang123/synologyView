@@ -59,6 +59,9 @@ struct ContentView: View {
                     createFolderAction: { name, parentPath in
                         Task { await model.createFolder(named: name, in: parentPath) }
                     },
+                    saveImageAction: { item in
+                        await model.saveImageToPhotoLibrary(item)
+                    },
                     renameAction: { item, newName in
                         Task { await model.rename(item, to: newName) }
                     },

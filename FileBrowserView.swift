@@ -24,6 +24,7 @@ struct FileBrowserView: View {
     let uploadMediaAction: ([SynologyUploadFile], String) async -> Void
     let retryUploadAction: (UUID) -> Void
     let createFolderAction: (String, String) -> Void
+    let saveImageAction: (SynologyFileItem) async -> String
     let renameAction: (SynologyFileItem, String) -> Void
     let moveAction: ([SynologyFileItem], String) -> Void
     let deleteAction: ([SynologyFileItem]) -> Void
@@ -52,6 +53,7 @@ struct FileBrowserView: View {
     @State private var renameText = ""
     @State private var isCreateFolderDialogPresented = false
     @State private var newFolderName = ""
+    @State private var imageSaveMessage: String?
     @State private var moveSelection: FileOperationSelection?
     @State private var deleteSelection: FileOperationSelection?
     @AppStorage("synology.fileDisplayMode") private var displayModeRawValue = FileDisplayMode.list.rawValue
@@ -80,6 +82,7 @@ struct FileBrowserView: View {
                         }
                     },
                     previewAction: previewAction,
+                    saveImageAction: saveImage,
                     renameRequestAction: prepareRename,
                     moveRequestAction: { moveSelection = FileOperationSelection(items: [$0]) },
                     deleteRequestAction: { deleteSelection = FileOperationSelection(items: [$0]) }
@@ -106,6 +109,7 @@ struct FileBrowserView: View {
                         }
                     },
                     previewAction: previewAction,
+                    saveImageAction: saveImage,
                     renameRequestAction: prepareRename,
                     moveRequestAction: { moveSelection = FileOperationSelection(items: [$0]) },
                     deleteRequestAction: { deleteSelection = FileOperationSelection(items: [$0]) },
@@ -257,6 +261,13 @@ struct FileBrowserView: View {
         } message: {
             Text("将在当前目录中创建文件夹。")
         }
+        .alert("保存图片", isPresented: imageSaveDialogBinding) {
+            Button("好", role: .cancel) {
+                imageSaveMessage = nil
+            }
+        } message: {
+            Text(imageSaveMessage ?? "")
+        }
         .alert("重命名", isPresented: renameDialogBinding) {
             TextField("新文件名", text: $renameText)
                 .autocorrectionDisabled()
@@ -370,6 +381,22 @@ struct FileBrowserView: View {
             if !isPresented {
                 renameItem = nil
             }
+        }
+    }
+
+    private var imageSaveDialogBinding: Binding<Bool> {
+        Binding {
+            imageSaveMessage != nil
+        } set: { isPresented in
+            if !isPresented {
+                imageSaveMessage = nil
+            }
+        }
+    }
+
+    private func saveImage(_ item: SynologyFileItem) {
+        Task {
+            imageSaveMessage = await saveImageAction(item)
         }
     }
 
@@ -620,6 +647,7 @@ private struct FileListView: View {
     let refreshAction: () async -> Void
     let openFolderAction: (SynologyFileItem) -> Void
     let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
+    let saveImageAction: (SynologyFileItem) -> Void
     let renameRequestAction: (SynologyFileItem) -> Void
     let moveRequestAction: (SynologyFileItem) -> Void
     let deleteRequestAction: (SynologyFileItem) -> Void
@@ -639,6 +667,7 @@ private struct FileListView: View {
             refreshAction: refreshAction,
             openFolderAction: openFolderAction,
             previewAction: previewAction,
+            saveImageAction: saveImageAction,
             renameRequestAction: renameRequestAction,
             moveRequestAction: moveRequestAction,
             deleteRequestAction: deleteRequestAction
@@ -659,6 +688,7 @@ private struct FavoriteListView: View {
     let refreshAction: () async -> Void
     let openFolderAction: (SynologyFileItem) -> Void
     let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
+    let saveImageAction: (SynologyFileItem) -> Void
     let renameRequestAction: (SynologyFileItem) -> Void
     let moveRequestAction: (SynologyFileItem) -> Void
     let deleteRequestAction: (SynologyFileItem) -> Void
@@ -683,6 +713,7 @@ private struct FavoriteListView: View {
             refreshAction: refreshAction,
             openFolderAction: openFolderAction,
             previewAction: previewAction,
+            saveImageAction: saveImageAction,
             renameRequestAction: renameRequestAction,
             moveRequestAction: moveRequestAction,
             deleteRequestAction: deleteRequestAction
@@ -711,6 +742,7 @@ private struct BrowserListView: View {
     let refreshAction: () async -> Void
     let openFolderAction: (SynologyFileItem) -> Void
     let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
+    let saveImageAction: (SynologyFileItem) -> Void
     let renameRequestAction: (SynologyFileItem) -> Void
     let moveRequestAction: (SynologyFileItem) -> Void
     let deleteRequestAction: (SynologyFileItem) -> Void
@@ -748,6 +780,7 @@ private struct BrowserListView: View {
                     thumbnailURLAction: refreshedThumbnailURL,
                     openFolderAction: openFolderAction,
                     previewAction: previewAction,
+                    saveImageAction: saveImageAction,
                     renameRequestAction: renameRequestAction,
                     moveRequestAction: moveRequestAction,
                     deleteRequestAction: deleteRequestAction
@@ -851,6 +884,14 @@ private struct BrowserListView: View {
             moveRequestAction(item)
         } label: {
             Label("移动到", systemImage: "folder")
+        }
+
+        if item.isImage {
+            Button {
+                saveImageAction(item)
+            } label: {
+                Label("保存到相册", systemImage: "square.and.arrow.down")
+            }
         }
 
         Button(role: .destructive) {
@@ -1620,6 +1661,7 @@ private struct FileListSection: View {
     let thumbnailURLAction: (SynologyFileItem) -> URL?
     let openFolderAction: (SynologyFileItem) -> Void
     let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
+    let saveImageAction: (SynologyFileItem) -> Void
     let renameRequestAction: (SynologyFileItem) -> Void
     let moveRequestAction: (SynologyFileItem) -> Void
     let deleteRequestAction: (SynologyFileItem) -> Void
@@ -1652,6 +1694,15 @@ private struct FileListSection: View {
                 }
                 .buttonStyle(.plain)
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    if item.isImage {
+                        Button {
+                            saveImageAction(item)
+                        } label: {
+                            Label("保存", systemImage: "square.and.arrow.down")
+                        }
+                        .tint(.green)
+                    }
+
                     Button {
                         deleteRequestAction(item)
                     } label: {
@@ -1674,6 +1725,14 @@ private struct FileListSection: View {
                     .tint(.blue)
                 }
                 .contextMenu {
+                    if item.isImage {
+                        Button {
+                            saveImageAction(item)
+                        } label: {
+                            Label("保存到相册", systemImage: "square.and.arrow.down")
+                        }
+                    }
+
                     Button {
                         renameRequestAction(item)
                     } label: {

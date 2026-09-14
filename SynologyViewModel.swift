@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import Photos
 
 @MainActor
 @Observable
@@ -549,6 +550,34 @@ final class SynologyViewModel {
             try await client.createFolder(api: fileStationCreateFolderAPI, parentPath: destination, name: cleanName)
             try await reloadAfterFileOperation(using: client)
             statusMessage = "已新建文件夹 \(cleanName)"
+        }
+    }
+
+    func saveImageToPhotoLibrary(_ item: SynologyFileItem) async -> String {
+        guard item.isImage else {
+            return "该文件不是支持保存的图片"
+        }
+        guard let sessionID else {
+            return SynologyClientError.notAuthenticated.localizedDescription
+        }
+
+        do {
+            let authorizationStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            guard authorizationStatus == .authorized || authorizationStatus == .limited else {
+                return "没有照片添加权限，请在系统设置中允许访问照片。"
+            }
+
+            let client = try SynologyClient(serverURLString: serverURLString, sessionID: sessionID)
+            let data = try await client.downloadData(api: fileStationDownloadAPI, for: item.path)
+            let fileName = item.name
+            try await PHPhotoLibrary.shared().performChanges {
+                let options = PHAssetResourceCreationOptions()
+                options.originalFilename = fileName
+                PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: options)
+            }
+            return "“\(item.name)”已保存到手机相册"
+        } catch {
+            return "保存失败：\(error.localizedDescription)"
         }
     }
 
