@@ -56,10 +56,11 @@ struct CinemaHomeView: View {
             cinemaContent
         }
         .listStyle(.insetGrouped)
-        .task(id: CinemaScanRequest(folders: folders, isActive: isActive)) {
-            guard isActive else { return }
+        .task(id: folders) {
             loadLocalState()
-            await scan()
+            if isActive {
+                await scan()
+            }
         }
         .onChange(of: manualSyncToken) {
             Task { await scan() }
@@ -75,6 +76,7 @@ struct CinemaHomeView: View {
         .onChange(of: isActive) {
             if isActive {
                 loadViewingStates()
+                Task { await scan() }
             }
         }
     }
@@ -1173,11 +1175,6 @@ private struct TVShowDetailView: View {
                 return (lhs.videoPath ?? lhs.id) < (rhs.videoPath ?? rhs.id)
             }
     }
-}
-
-private struct CinemaScanRequest: Hashable {
-    let folders: [CinemaLibraryFolder]
-    let isActive: Bool
 }
 
 struct CinemaLibrarySettingsView: View {
