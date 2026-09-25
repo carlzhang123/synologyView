@@ -59,6 +59,8 @@ struct FileBrowserView: View {
     @AppStorage("synology.fileDisplayMode") private var displayModeRawValue = FileDisplayMode.list.rawValue
     @State private var fileTransitionEdge: Edge = .trailing
     @State private var favoriteTransitionEdge: Edge = .trailing
+    @State private var backSwipeOffset: CGFloat = 0
+    @State private var isCompletingInteractiveBack = false
     @State private var cinemaLibraryFolders: [CinemaLibraryFolder] = []
     @State private var isCinemaSyncing = false
     @State private var cinemaManualSyncToken = UUID()
@@ -74,6 +76,8 @@ struct FileBrowserView: View {
                     selectedItemIDs: $selectedItemIDs,
                     displayMode: displayMode,
                     transitionEdge: fileTransitionEdge,
+                    backSwipeOffset: selectedTab == .files ? backSwipeOffset : 0,
+                    suppressPathAnimation: isCompletingInteractiveBack,
                     thumbnailURLAction: thumbnailURLAction,
                     refreshAction: refreshAction,
                     openFolderAction: { item in
@@ -101,6 +105,8 @@ struct FileBrowserView: View {
                     selectedItemIDs: $selectedItemIDs,
                     displayMode: displayMode,
                     transitionEdge: favoriteTransitionEdge,
+                    backSwipeOffset: selectedTab == .favorites ? backSwipeOffset : 0,
+                    suppressPathAnimation: isCompletingInteractiveBack,
                     thumbnailURLAction: thumbnailURLAction,
                     refreshAction: refreshFavoriteLocationAction,
                     openFolderAction: { item in
@@ -457,17 +463,45 @@ struct FileBrowserView: View {
     }
 
     private var edgeBackGesture: some Gesture {
-        DragGesture(minimumDistance: 20)
-            .onEnded { value in
+        DragGesture(minimumDistance: 8)
+            .onChanged { value in
                 guard !isSelectionMode,
+                      !isLoading,
                       canGoBackInSelectedTab,
-                      value.startLocation.x < 24,
-                      value.translation.width > 70,
+                      value.startLocation.x < 28,
+                      value.translation.width > 0,
                       abs(value.translation.width) > abs(value.translation.height) else {
                     return
                 }
 
-                performBack()
+                backSwipeOffset = value.translation.width
+            }
+            .onEnded { value in
+                guard backSwipeOffset > 0 else {
+                    return
+                }
+
+                let shouldReturn = value.translation.width > 120
+                    || value.predictedEndTranslation.width > 220
+
+                if shouldReturn {
+                    isCompletingInteractiveBack = true
+                    withAnimation(.smooth(duration: 0.18)) {
+                        backSwipeOffset = max(value.translation.width, 430)
+                    }
+
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(180))
+                        performBack()
+                        backSwipeOffset = 0
+                        try? await Task.sleep(for: .milliseconds(100))
+                        isCompletingInteractiveBack = false
+                    }
+                } else {
+                    withAnimation(.smooth(duration: 0.22)) {
+                        backSwipeOffset = 0
+                    }
+                }
             }
     }
 
@@ -635,7 +669,18 @@ private struct FileOperationSelection: Identifiable {
     }
 }
 
+private struct BrowserPageSnapshot: Identifiable {
+    let path: String
+    let items: [SynologyFileItem]
+
+    var id: String {
+        path.isEmpty ? "browser-root" : path
+    }
+}
+
 private struct FileListView: View {
+    @State private var pageHistory: [BrowserPageSnapshot] = []
+
     let currentPath: String
     let items: [SynologyFileItem]
     let isLoading: Bool
@@ -643,6 +688,8 @@ private struct FileListView: View {
     @Binding var selectedItemIDs: Set<String>
     let displayMode: FileDisplayMode
     let transitionEdge: Edge
+    let backSwipeOffset: CGFloat
+    let suppressPathAnimation: Bool
     let thumbnailURLAction: (SynologyFileItem) -> URL?
     let refreshAction: () async -> Void
     let openFolderAction: (SynologyFileItem) -> Void
@@ -653,10 +700,35 @@ private struct FileListView: View {
     let deleteRequestAction: (SynologyFileItem) -> Void
 
     var body: some View {
+        ZStack {
+            ForEach(pageHistory) { page in
+                browserPage(path: page.path, items: page.items)
+                    .allowsHitTesting(false)
+            }
+
+            browserPage(path: currentPath, items: items)
+                .offset(x: backSwipeOffset)
+                .shadow(color: .black.opacity(backSwipeOffset > 0 ? 0.18 : 0), radius: 8, x: -4)
+                .id(currentPath)
+                .transition(.push(from: transitionEdge))
+        }
+        .clipped()
+        .animation(suppressPathAnimation ? nil : .smooth(duration: 0.32), value: currentPath)
+        .onChange(of: currentPath) { _, newPath in
+            reconcileHistory(for: newPath)
+        }
+        .onChange(of: isLoading) { wasLoading, isLoading in
+            if wasLoading, !isLoading, pageHistory.last?.path == currentPath {
+                pageHistory.removeLast()
+            }
+        }
+    }
+
+    private func browserPage(path: String, items: [SynologyFileItem]) -> some View {
         BrowserListView(
             emptyTitle: "没有文件夹或文件",
-            sectionTitle: currentPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "共享文件夹" : "文件夹清单",
-            contentID: currentPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "files-root" : currentPath,
+            sectionTitle: path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "共享文件夹" : "文件夹清单",
+            contentID: path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "files-root" : path,
             transitionEdge: transitionEdge,
             items: items,
             isLoading: isLoading,
@@ -665,7 +737,12 @@ private struct FileListView: View {
             displayMode: displayMode,
             thumbnailURLAction: thumbnailURLAction,
             refreshAction: refreshAction,
-            openFolderAction: openFolderAction,
+            openFolderAction: { item in
+                withAnimation(.smooth(duration: 0.32)) {
+                    pageHistory.append(BrowserPageSnapshot(path: path, items: items))
+                }
+                openFolderAction(item)
+            },
             previewAction: previewAction,
             saveImageAction: saveImageAction,
             renameRequestAction: renameRequestAction,
@@ -673,9 +750,19 @@ private struct FileListView: View {
             deleteRequestAction: deleteRequestAction
         )
     }
+
+    private func reconcileHistory(for newPath: String) {
+        if pageHistory.last?.path == newPath {
+            pageHistory.removeLast()
+        } else if newPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pageHistory.removeAll()
+        }
+    }
 }
 
 private struct FavoriteListView: View {
+    @State private var pageHistory: [BrowserPageSnapshot] = []
+
     let currentPath: String
     let rootItems: [SynologyFileItem]
     let browserItems: [SynologyFileItem]
@@ -684,6 +771,8 @@ private struct FavoriteListView: View {
     @Binding var selectedItemIDs: Set<String>
     let displayMode: FileDisplayMode
     let transitionEdge: Edge
+    let backSwipeOffset: CGFloat
+    let suppressPathAnimation: Bool
     let thumbnailURLAction: (SynologyFileItem) -> URL?
     let refreshAction: () async -> Void
     let openFolderAction: (SynologyFileItem) -> Void
@@ -698,30 +787,74 @@ private struct FavoriteListView: View {
         currentPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var currentItems: [SynologyFileItem] {
+        isRoot ? rootItems : browserItems
+    }
+
     var body: some View {
-        BrowserListView(
-            emptyTitle: isRoot ? "没有收藏夹" : "没有文件夹或文件",
-            sectionTitle: isRoot ? "群晖收藏夹" : "文件夹清单",
-            contentID: isRoot ? "favorites-root" : currentPath,
+        ZStack {
+            ForEach(pageHistory) { page in
+                browserPage(path: page.path, items: page.items)
+                    .allowsHitTesting(false)
+            }
+
+            browserPage(path: currentPath, items: currentItems)
+                .offset(x: backSwipeOffset)
+                .shadow(color: .black.opacity(backSwipeOffset > 0 ? 0.18 : 0), radius: 8, x: -4)
+                .id(currentPath)
+                .transition(.push(from: transitionEdge))
+        }
+        .clipped()
+        .animation(suppressPathAnimation ? nil : .smooth(duration: 0.32), value: currentPath)
+        .onChange(of: currentPath) { _, newPath in
+            reconcileHistory(for: newPath)
+        }
+        .onChange(of: isLoading) { wasLoading, isLoading in
+            if wasLoading, !isLoading, pageHistory.last?.path == currentPath {
+                pageHistory.removeLast()
+            }
+        }
+        .task {
+            if isRoot {
+                loadFavoritesAction()
+            }
+        }
+    }
+
+    private func browserPage(path: String, items: [SynologyFileItem]) -> some View {
+        let pageIsRoot = path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        return BrowserListView(
+            emptyTitle: pageIsRoot ? "没有收藏夹" : "没有文件夹或文件",
+            sectionTitle: pageIsRoot ? "群晖收藏夹" : "文件夹清单",
+            contentID: pageIsRoot ? "favorites-root" : path,
             transitionEdge: transitionEdge,
-            items: isRoot ? rootItems : browserItems,
+            items: items,
             isLoading: isLoading,
             isSelectionMode: isSelectionMode,
             selectedItemIDs: $selectedItemIDs,
             displayMode: displayMode,
             thumbnailURLAction: thumbnailURLAction,
             refreshAction: refreshAction,
-            openFolderAction: openFolderAction,
+            openFolderAction: { item in
+                withAnimation(.smooth(duration: 0.32)) {
+                    pageHistory.append(BrowserPageSnapshot(path: path, items: items))
+                }
+                openFolderAction(item)
+            },
             previewAction: previewAction,
             saveImageAction: saveImageAction,
             renameRequestAction: renameRequestAction,
             moveRequestAction: moveRequestAction,
             deleteRequestAction: deleteRequestAction
         )
-        .task {
-            if isRoot {
-                loadFavoritesAction()
-            }
+    }
+
+    private func reconcileHistory(for newPath: String) {
+        if pageHistory.last?.path == newPath {
+            pageHistory.removeLast()
+        } else if newPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pageHistory.removeAll()
         }
     }
 }
@@ -748,13 +881,8 @@ private struct BrowserListView: View {
     let deleteRequestAction: (SynologyFileItem) -> Void
 
     var body: some View {
-        ZStack {
-            browserContent
-                .id(contentID)
-                .transition(.push(from: transitionEdge))
-        }
-        .animation(.smooth(duration: 0.32), value: contentID)
-        .animation(.easeInOut(duration: 0.18), value: isSelectionMode)
+        browserContent
+            .animation(.easeInOut(duration: 0.18), value: isSelectionMode)
     }
 
     @ViewBuilder

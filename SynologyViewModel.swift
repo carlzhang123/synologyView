@@ -5,6 +5,11 @@ import Photos
 @MainActor
 @Observable
 final class SynologyViewModel {
+    private struct FolderSnapshot {
+        let path: String
+        let items: [SynologyFileItem]
+    }
+
     var serverURLString = ""
     var savedServers: [String] = []
     var account = ""
@@ -42,8 +47,8 @@ final class SynologyViewModel {
     private(set) var fileStationDeleteAPI: SynologyAPIInfo?
     private(set) var fileStationSearchAPI: SynologyAPIInfo?
     private var sessionID: String?
-    private var pathHistory: [String] = []
-    private var favoritePathHistory: [String] = []
+    private var fileHistory: [FolderSnapshot] = []
+    private var favoriteHistory: [FolderSnapshot] = []
     private var previewImageItems: [SynologyFileItem] = []
     private var didAttemptAutoLogin = false
     private let settingsStore = SynologyLoginSettingsStore()
@@ -82,11 +87,11 @@ final class SynologyViewModel {
     }
 
     var canGoBack: Bool {
-        !pathHistory.isEmpty || !normalizedPath(currentPath).isEmpty
+        !fileHistory.isEmpty || !normalizedPath(currentPath).isEmpty
     }
 
     var canGoFavoriteBack: Bool {
-        !favoritePathHistory.isEmpty || !normalizedPath(favoriteCurrentPath).isEmpty
+        !favoriteHistory.isEmpty || !normalizedPath(favoriteCurrentPath).isEmpty
     }
 
     func login() async {
@@ -129,8 +134,8 @@ final class SynologyViewModel {
         favoriteItems = []
         favoriteCurrentPath = ""
         favoriteBrowserItems = []
-        pathHistory = []
-        favoritePathHistory = []
+        fileHistory = []
+        favoriteHistory = []
         previewItem = nil
         previewImageItems = []
         statusMessage = "已退出登录"
@@ -222,69 +227,94 @@ final class SynologyViewModel {
     }
 
     func openParentFolder() async {
-        let path = normalizedPath(currentPath)
-        guard !path.isEmpty else {
-            return
-        }
-
-        await navigateFiles(to: parentPath(for: path), recordsHistory: true, historyPath: path)
+        await goBack()
     }
 
     func openFavoriteParentFolder() async {
-        let path = normalizedPath(favoriteCurrentPath)
-        guard !path.isEmpty else {
-            return
-        }
-
-        await navigateFavorites(to: parentPath(for: path), recordsHistory: true, historyPath: path)
+        await goFavoriteBack()
     }
 
     func goBack() async {
-        guard !isLoading else {
+        guard !isLoading, !normalizedPath(currentPath).isEmpty else {
             return
         }
-        let current = normalizedPath(currentPath)
-        guard !current.isEmpty else { return }
-        let targetPath = pathHistory.last ?? parentPath(for: current)
-        await navigateFiles(to: targetPath, recordsHistory: false)
+
+        if let snapshot = fileHistory.popLast() {
+            currentPath = snapshot.path
+            fileItems = snapshot.items
+            statusMessage = snapshot.path.isEmpty
+                ? "已返回，共 \(snapshot.items.count) 个共享文件夹"
+                : "已返回，共 \(snapshot.items.count) 个项目"
+            return
+        }
+
+        await navigateFiles(to: parentPath(for: currentPath), recordsHistory: false)
     }
 
     func goFavoriteBack() async {
-        guard !isLoading else {
+        guard !isLoading, !normalizedPath(favoriteCurrentPath).isEmpty else {
             return
         }
-        let current = normalizedPath(favoriteCurrentPath)
-        guard !current.isEmpty else { return }
-        let targetPath = favoritePathHistory.last ?? parentPath(for: current)
-        await navigateFavorites(to: targetPath, recordsHistory: false)
+
+        if let snapshot = favoriteHistory.popLast() {
+            favoriteCurrentPath = snapshot.path
+            if snapshot.path.isEmpty {
+                favoriteItems = snapshot.items
+                favoriteBrowserItems = []
+                statusMessage = "已返回，共 \(snapshot.items.count) 个收藏夹"
+            } else {
+                favoriteBrowserItems = snapshot.items
+                statusMessage = "已返回，共 \(snapshot.items.count) 个收藏夹项目"
+            }
+            return
+        }
+
+        await navigateFavorites(to: parentPath(for: favoriteCurrentPath), recordsHistory: false)
     }
 
     func returnToFileRoot() async {
         guard !isLoading, !normalizedPath(currentPath).isEmpty else { return }
-        await navigateFiles(to: "", recordsHistory: false)
-        if normalizedPath(currentPath).isEmpty {
-            pathHistory.removeAll()
+
+        if let rootSnapshot = fileHistory.first(where: { $0.path.isEmpty }) {
+            currentPath = ""
+            fileItems = rootSnapshot.items
+            fileHistory.removeAll()
+            statusMessage = "已返回，共 \(rootSnapshot.items.count) 个共享文件夹"
+        } else {
+            await navigateFiles(to: "", recordsHistory: false)
+            if normalizedPath(currentPath).isEmpty {
+                fileHistory.removeAll()
+            }
         }
     }
 
     func returnToFavoriteRoot() async {
         guard !isLoading, !normalizedPath(favoriteCurrentPath).isEmpty else { return }
-        await navigateFavorites(to: "", recordsHistory: false)
-        if normalizedPath(favoriteCurrentPath).isEmpty {
-            favoritePathHistory.removeAll()
+
+        if let rootSnapshot = favoriteHistory.first(where: { $0.path.isEmpty }) {
+            favoriteCurrentPath = ""
+            favoriteItems = rootSnapshot.items
+            favoriteBrowserItems = []
+            favoriteHistory.removeAll()
+            statusMessage = "已返回，共 \(rootSnapshot.items.count) 个收藏夹"
+        } else {
+            await navigateFavorites(to: "", recordsHistory: false)
+            if normalizedPath(favoriteCurrentPath).isEmpty {
+                favoriteHistory.removeAll()
+            }
         }
     }
 
-    private func navigateFiles(to path: String, recordsHistory: Bool, historyPath: String? = nil) async {
+    private func navigateFiles(to path: String, recordsHistory: Bool) async {
         await runNetworkOperation {
             let normalizedTargetPath = normalizedPath(path)
             let (client, listAPI) = try await fileListContext()
             let targetItems = try await loadFileItems(at: normalizedTargetPath, using: client, listAPI: listAPI)
 
             if recordsHistory {
-                pathHistory.append(historyPath ?? normalizedPath(currentPath))
-            } else if !pathHistory.isEmpty {
-                pathHistory.removeLast()
+                fileHistory.append(
+                    FolderSnapshot(path: normalizedPath(currentPath), items: fileItems)
+                )
             }
 
             currentPath = normalizedTargetPath
@@ -293,7 +323,7 @@ final class SynologyViewModel {
         }
     }
 
-    private func navigateFavorites(to path: String, recordsHistory: Bool, historyPath: String? = nil) async {
+    private func navigateFavorites(to path: String, recordsHistory: Bool) async {
         await runNetworkOperation {
             let normalizedTargetPath = normalizedPath(path)
             let (client, listAPI) = try await fileListContext()
@@ -309,9 +339,12 @@ final class SynologyViewModel {
             }
 
             if recordsHistory {
-                favoritePathHistory.append(historyPath ?? normalizedPath(favoriteCurrentPath))
-            } else if !favoritePathHistory.isEmpty {
-                favoritePathHistory.removeLast()
+                let currentItems = normalizedPath(favoriteCurrentPath).isEmpty
+                    ? favoriteItems
+                    : favoriteBrowserItems
+                favoriteHistory.append(
+                    FolderSnapshot(path: normalizedPath(favoriteCurrentPath), items: currentItems)
+                )
             }
 
             favoriteCurrentPath = normalizedTargetPath
@@ -957,8 +990,8 @@ final class SynologyViewModel {
         favoriteItems = []
         favoriteCurrentPath = ""
         favoriteBrowserItems = []
-        pathHistory = []
-        favoritePathHistory = []
+        fileHistory = []
+        favoriteHistory = []
 
         let authenticatedClient = try SynologyClient(serverURLString: normalizedServerURLString, sessionID: loginResult.sid)
         fileItems = try await authenticatedClient.loadSharedFolders(api: fileStationListAPI)
@@ -1121,8 +1154,8 @@ final class SynologyViewModel {
         favoriteItems = []
         favoriteCurrentPath = ""
         favoriteBrowserItems = []
-        pathHistory = []
-        favoritePathHistory = []
+        fileHistory = []
+        favoriteHistory = []
         previewItem = nil
         previewImageItems = []
         statusMessage = message
