@@ -679,7 +679,8 @@ private struct BrowserPageSnapshot: Identifiable {
 }
 
 private struct FileListView: View {
-    @State private var pageHistory: [BrowserPageSnapshot] = []
+    @State private var pageStack: [BrowserPageSnapshot] = []
+    @State private var scrollPositions: [String: String] = [:]
 
     let currentPath: String
     let items: [SynologyFileItem]
@@ -699,50 +700,60 @@ private struct FileListView: View {
     let moveRequestAction: (SynologyFileItem) -> Void
     let deleteRequestAction: (SynologyFileItem) -> Void
 
+    private var currentPageID: String {
+        currentPath.isEmpty ? "browser-root" : currentPath
+    }
+
     var body: some View {
         ZStack {
-            ForEach(pageHistory) { page in
-                browserPage(path: page.path, items: page.items)
-                    .allowsHitTesting(false)
-            }
-
-            browserPage(path: currentPath, items: items)
-                .offset(x: backSwipeOffset)
-                .shadow(color: .black.opacity(backSwipeOffset > 0 ? 0.18 : 0), radius: 8, x: -4)
-                .id(currentPath)
+            ForEach(pageStack) { page in
+                browserPage(
+                    path: page.path,
+                    items: page.items,
+                    isPageLoading: page.id == currentPageID && isLoading
+                )
+                .id(page.id)
+                .offset(x: page.id == currentPageID ? backSwipeOffset : 0)
+                .shadow(
+                    color: .black.opacity(page.id == currentPageID && backSwipeOffset > 0 ? 0.18 : 0),
+                    radius: 8,
+                    x: -4
+                )
+                .allowsHitTesting(page.id == currentPageID)
                 .transition(.push(from: transitionEdge))
+            }
         }
         .clipped()
-        .animation(suppressPathAnimation ? nil : .smooth(duration: 0.32), value: currentPath)
-        .onChange(of: currentPath) { _, newPath in
-            reconcileHistory(for: newPath)
+        .onAppear {
+            synchronizePageStack(path: currentPath, items: items, animated: false)
         }
-        .onChange(of: isLoading) { wasLoading, isLoading in
-            if wasLoading, !isLoading, pageHistory.last?.path == currentPath {
-                pageHistory.removeLast()
-            }
+        .onChange(of: currentPath) { _, newPath in
+            synchronizePageStack(path: newPath, items: items, animated: !suppressPathAnimation)
+        }
+        .onChange(of: items) { _, newItems in
+            updateCurrentPageItems(newItems)
         }
     }
 
-    private func browserPage(path: String, items: [SynologyFileItem]) -> some View {
+    private func browserPage(
+        path: String,
+        items: [SynologyFileItem],
+        isPageLoading: Bool
+    ) -> some View {
         BrowserListView(
             emptyTitle: "没有文件夹或文件",
             sectionTitle: path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "共享文件夹" : "文件夹清单",
             contentID: path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "files-root" : path,
             transitionEdge: transitionEdge,
+            scrollPositionID: scrollPositionBinding(for: path),
             items: items,
-            isLoading: isLoading,
+            isLoading: isPageLoading,
             isSelectionMode: isSelectionMode,
             selectedItemIDs: $selectedItemIDs,
             displayMode: displayMode,
             thumbnailURLAction: thumbnailURLAction,
             refreshAction: refreshAction,
-            openFolderAction: { item in
-                withAnimation(.smooth(duration: 0.32)) {
-                    pageHistory.append(BrowserPageSnapshot(path: path, items: items))
-                }
-                openFolderAction(item)
-            },
+            openFolderAction: openFolderAction,
             previewAction: previewAction,
             saveImageAction: saveImageAction,
             renameRequestAction: renameRequestAction,
@@ -751,17 +762,51 @@ private struct FileListView: View {
         )
     }
 
-    private func reconcileHistory(for newPath: String) {
-        if pageHistory.last?.path == newPath {
-            pageHistory.removeLast()
-        } else if newPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            pageHistory.removeAll()
+    private func synchronizePageStack(
+        path: String,
+        items: [SynologyFileItem],
+        animated: Bool
+    ) {
+        let update = {
+            if let existingIndex = pageStack.firstIndex(where: { $0.path == path }) {
+                let removalStart = pageStack.index(after: existingIndex)
+                pageStack.removeSubrange(removalStart..<pageStack.endIndex)
+            } else {
+                pageStack.append(BrowserPageSnapshot(path: path, items: items))
+            }
+        }
+
+        if animated {
+            withAnimation(.smooth(duration: 0.32), update)
+        } else {
+            update()
+        }
+    }
+
+    private func updateCurrentPageItems(_ newItems: [SynologyFileItem]) {
+        guard let lastPage = pageStack.last, lastPage.path == currentPath else {
+            synchronizePageStack(path: currentPath, items: newItems, animated: false)
+            return
+        }
+
+        pageStack[pageStack.count - 1] = BrowserPageSnapshot(
+            path: lastPage.path,
+            items: newItems
+        )
+    }
+
+    private func scrollPositionBinding(for path: String) -> Binding<String?> {
+        Binding {
+            scrollPositions[path]
+        } set: { newValue in
+            scrollPositions[path] = newValue
         }
     }
 }
 
 private struct FavoriteListView: View {
-    @State private var pageHistory: [BrowserPageSnapshot] = []
+    @State private var pageStack: [BrowserPageSnapshot] = []
+    @State private var scrollPositions: [String: String] = [:]
 
     let currentPath: String
     let rootItems: [SynologyFileItem]
@@ -791,28 +836,38 @@ private struct FavoriteListView: View {
         isRoot ? rootItems : browserItems
     }
 
+    private var currentPageID: String {
+        isRoot ? "browser-root" : currentPath
+    }
+
     var body: some View {
         ZStack {
-            ForEach(pageHistory) { page in
-                browserPage(path: page.path, items: page.items)
-                    .allowsHitTesting(false)
-            }
-
-            browserPage(path: currentPath, items: currentItems)
-                .offset(x: backSwipeOffset)
-                .shadow(color: .black.opacity(backSwipeOffset > 0 ? 0.18 : 0), radius: 8, x: -4)
-                .id(currentPath)
+            ForEach(pageStack) { page in
+                browserPage(
+                    path: page.path,
+                    items: page.items,
+                    isPageLoading: page.id == currentPageID && isLoading
+                )
+                .id(page.id)
+                .offset(x: page.id == currentPageID ? backSwipeOffset : 0)
+                .shadow(
+                    color: .black.opacity(page.id == currentPageID && backSwipeOffset > 0 ? 0.18 : 0),
+                    radius: 8,
+                    x: -4
+                )
+                .allowsHitTesting(page.id == currentPageID)
                 .transition(.push(from: transitionEdge))
+            }
         }
         .clipped()
-        .animation(suppressPathAnimation ? nil : .smooth(duration: 0.32), value: currentPath)
-        .onChange(of: currentPath) { _, newPath in
-            reconcileHistory(for: newPath)
+        .onAppear {
+            synchronizePageStack(path: currentPath, items: currentItems, animated: false)
         }
-        .onChange(of: isLoading) { wasLoading, isLoading in
-            if wasLoading, !isLoading, pageHistory.last?.path == currentPath {
-                pageHistory.removeLast()
-            }
+        .onChange(of: currentPath) { _, newPath in
+            synchronizePageStack(path: newPath, items: currentItems, animated: !suppressPathAnimation)
+        }
+        .onChange(of: currentItems) { _, newItems in
+            updateCurrentPageItems(newItems)
         }
         .task {
             if isRoot {
@@ -821,7 +876,11 @@ private struct FavoriteListView: View {
         }
     }
 
-    private func browserPage(path: String, items: [SynologyFileItem]) -> some View {
+    private func browserPage(
+        path: String,
+        items: [SynologyFileItem],
+        isPageLoading: Bool
+    ) -> some View {
         let pageIsRoot = path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         return BrowserListView(
@@ -829,19 +888,15 @@ private struct FavoriteListView: View {
             sectionTitle: pageIsRoot ? "群晖收藏夹" : "文件夹清单",
             contentID: pageIsRoot ? "favorites-root" : path,
             transitionEdge: transitionEdge,
+            scrollPositionID: scrollPositionBinding(for: path),
             items: items,
-            isLoading: isLoading,
+            isLoading: isPageLoading,
             isSelectionMode: isSelectionMode,
             selectedItemIDs: $selectedItemIDs,
             displayMode: displayMode,
             thumbnailURLAction: thumbnailURLAction,
             refreshAction: refreshAction,
-            openFolderAction: { item in
-                withAnimation(.smooth(duration: 0.32)) {
-                    pageHistory.append(BrowserPageSnapshot(path: path, items: items))
-                }
-                openFolderAction(item)
-            },
+            openFolderAction: openFolderAction,
             previewAction: previewAction,
             saveImageAction: saveImageAction,
             renameRequestAction: renameRequestAction,
@@ -850,11 +905,44 @@ private struct FavoriteListView: View {
         )
     }
 
-    private func reconcileHistory(for newPath: String) {
-        if pageHistory.last?.path == newPath {
-            pageHistory.removeLast()
-        } else if newPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            pageHistory.removeAll()
+    private func synchronizePageStack(
+        path: String,
+        items: [SynologyFileItem],
+        animated: Bool
+    ) {
+        let update = {
+            if let existingIndex = pageStack.firstIndex(where: { $0.path == path }) {
+                let removalStart = pageStack.index(after: existingIndex)
+                pageStack.removeSubrange(removalStart..<pageStack.endIndex)
+            } else {
+                pageStack.append(BrowserPageSnapshot(path: path, items: items))
+            }
+        }
+
+        if animated {
+            withAnimation(.smooth(duration: 0.32), update)
+        } else {
+            update()
+        }
+    }
+
+    private func updateCurrentPageItems(_ newItems: [SynologyFileItem]) {
+        guard let lastPage = pageStack.last, lastPage.path == currentPath else {
+            synchronizePageStack(path: currentPath, items: newItems, animated: false)
+            return
+        }
+
+        pageStack[pageStack.count - 1] = BrowserPageSnapshot(
+            path: lastPage.path,
+            items: newItems
+        )
+    }
+
+    private func scrollPositionBinding(for path: String) -> Binding<String?> {
+        Binding {
+            scrollPositions[path]
+        } set: { newValue in
+            scrollPositions[path] = newValue
         }
     }
 }
@@ -866,6 +954,7 @@ private struct BrowserListView: View {
     let sectionTitle: String
     let contentID: String
     let transitionEdge: Edge
+    @Binding var scrollPositionID: String?
     let items: [SynologyFileItem]
     let isLoading: Bool
     let isSelectionMode: Bool
@@ -916,6 +1005,7 @@ private struct BrowserListView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .scrollPosition(id: $scrollPositionID, anchor: .top)
         .refreshable {
             await refreshContent()
         }
@@ -943,10 +1033,12 @@ private struct BrowserListView: View {
                         }
                     }
                 }
+                .scrollTargetLayout()
                 .padding(.horizontal, 12)
                 .padding(.vertical, 12)
             }
         }
+        .scrollPosition(id: $scrollPositionID, anchor: .top)
         .refreshable {
             await refreshContent()
         }
