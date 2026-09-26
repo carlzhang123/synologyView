@@ -14,7 +14,7 @@ struct ContentView: View {
     var body: some View {
         @Bindable var model = model
 
-        NavigationStack {
+        Group {
             if model.isConnected {
                 FileBrowserView(
                     currentPath: $model.currentPath,
@@ -29,20 +29,30 @@ struct ContentView: View {
                     allowsInsecureConnections: $model.allowsInsecureConnections,
                     canGoBack: model.canGoBack,
                     canGoFavoriteBack: model.canGoFavoriteBack,
-                    refreshAction: {
+                    refreshAction: { path in
+                        guard model.currentPath == path else { return nil }
                         await model.loadCurrentLocation()
+                        guard model.currentPath == path else { return nil }
+                        return model.fileItems
                     },
                     loadFavoritesAction: {
                         Task { await model.loadFavorites() }
                     },
-                    refreshFavoriteLocationAction: {
+                    refreshFavoriteLocationAction: { path in
+                        guard model.favoriteCurrentPath == path else { return nil }
                         await model.loadFavoriteCurrentLocation()
+                        guard model.favoriteCurrentPath == path else { return nil }
+                        return path.isEmpty ? model.favoriteItems : model.favoriteBrowserItems
                     },
                     openFolderAction: { item in
-                        Task { await model.openFolder(item) }
+                        await model.openFolder(item)
+                        guard model.currentPath == item.path else { return nil }
+                        return model.fileItems
                     },
                     openFavoriteFolderAction: { item in
-                        Task { await model.openFavoriteFolder(item) }
+                        await model.openFavoriteFolder(item)
+                        guard model.favoriteCurrentPath == item.path else { return nil }
+                        return model.favoriteBrowserItems
                     },
                     previewAction: { item, contextItems in
                         model.preview(item, in: contextItems)

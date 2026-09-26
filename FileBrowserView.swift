@@ -14,11 +14,11 @@ struct FileBrowserView: View {
     @Binding var allowsInsecureConnections: Bool
     let canGoBack: Bool
     let canGoFavoriteBack: Bool
-    let refreshAction: () async -> Void
+    let refreshAction: (String) async -> [SynologyFileItem]?
     let loadFavoritesAction: () -> Void
-    let refreshFavoriteLocationAction: () async -> Void
-    let openFolderAction: (SynologyFileItem) -> Void
-    let openFavoriteFolderAction: (SynologyFileItem) -> Void
+    let refreshFavoriteLocationAction: (String) async -> [SynologyFileItem]?
+    let openFolderAction: (SynologyFileItem) async -> [SynologyFileItem]?
+    let openFavoriteFolderAction: (SynologyFileItem) async -> [SynologyFileItem]?
     let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
     let thumbnailURLAction: (SynologyFileItem) -> URL?
     let uploadMediaAction: ([SynologyUploadFile], String) async -> Void
@@ -81,6 +81,9 @@ struct FileBrowserView: View {
                     moveRequestAction: { moveSelection = FileOperationSelection(items: [$0]) },
                     deleteRequestAction: { deleteSelection = FileOperationSelection(items: [$0]) }
                 )
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.visible, for: .navigationBar)
+                .toolbar { browserToolbar }
                 .tabItem {
                     Label("文件", systemImage: "folder")
                 }
@@ -105,12 +108,16 @@ struct FileBrowserView: View {
                     deleteRequestAction: { deleteSelection = FileOperationSelection(items: [$0]) },
                     loadFavoritesAction: loadFavoritesAction
                 )
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.visible, for: .navigationBar)
+                .toolbar { browserToolbar }
                 .tabItem {
                     Label("收藏夹", systemImage: "star")
                 }
                 .tag(FileBrowserTab.favorites)
 
-                CinemaHomeView(
+                NavigationStack {
+                    CinemaHomeView(
                     folders: cinemaLibraryFolders,
                     serverURLString: serverURLString,
                     account: account,
@@ -125,13 +132,15 @@ struct FileBrowserView: View {
                     playbackDurationAction: cinemaPlaybackDurationAction,
                     clearPlaybackProgressAction: clearCinemaPlaybackProgressAction,
                     viewingStateRevision: cinemaViewingStateRevision
-                )
+                    )
+                }
                     .tabItem {
                         Label("影院", systemImage: "film")
                     }
                     .tag(FileBrowserTab.cinema)
 
-                SettingsView(
+                NavigationStack {
+                    SettingsView(
                     serverURLString: serverURLString,
                     account: account,
                     uploadProgressItems: uploadProgressItems,
@@ -144,60 +153,12 @@ struct FileBrowserView: View {
                     searchAction: searchAction,
                     previewAction: previewAction,
                     logoutAction: logoutAction
-                )
+                    )
+                }
                 .tabItem {
                     Label("设置", systemImage: "gearshape")
                 }
                 .tag(FileBrowserTab.settings)
-            }
-            .navigationTitle(navigationTitle)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    if isSelectionMode {
-                        Button("取消") {
-                            clearSelection()
-                        }
-                    }
-                }
-
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    if !isSelectionMode {
-                        if supportsFileOperations {
-                            Button {
-                                newFolderName = ""
-                                isCreateFolderDialogPresented = true
-                            } label: {
-                                Label("新建文件夹", systemImage: "folder.badge.plus")
-                            }
-                            .disabled(isLoading || uploadDestinationPath.isEmpty)
-
-                            PhotoLibraryUploadButton(
-                                destinationPath: uploadDestinationPath,
-                                isDisabled: isLoading || uploadDestinationPath.isEmpty,
-                                uploadAction: uploadMediaAction
-                            )
-
-                            Menu {
-                                Picker("显示模式", selection: displayModeBinding) {
-                                    Label("列表", systemImage: "list.bullet").tag(FileDisplayMode.list)
-                                    Label("缩略图", systemImage: "square.grid.2x2").tag(FileDisplayMode.grid)
-                                }
-                            } label: {
-                                Label("显示模式", systemImage: displayMode.iconName)
-                            }
-                        }
-
-                    }
-
-                    if supportsFileOperations {
-                        Button(isSelectionMode ? "完成" : "选择") {
-                            isSelectionMode ? clearSelection() : beginSelection()
-                        }
-                        .disabled(isLoading || visibleItems.isEmpty)
-                    }
-                }
             }
             .safeAreaInset(edge: .bottom) {
                 if isSelectionMode {
@@ -294,6 +255,51 @@ struct FileBrowserView: View {
             }
         } message: {
             Text("将删除 \(deleteSelection?.displayName ?? "")，此操作会同步到群晖。")
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var browserToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            if isSelectionMode {
+                Button("取消") {
+                    clearSelection()
+                }
+            }
+        }
+
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            if !isSelectionMode, supportsFileOperations {
+                Button {
+                    newFolderName = ""
+                    isCreateFolderDialogPresented = true
+                } label: {
+                    Label("新建文件夹", systemImage: "folder.badge.plus")
+                }
+                .disabled(isLoading || uploadDestinationPath.isEmpty)
+
+                PhotoLibraryUploadButton(
+                    destinationPath: uploadDestinationPath,
+                    isDisabled: isLoading || uploadDestinationPath.isEmpty,
+                    uploadAction: uploadMediaAction
+                )
+
+                Menu {
+                    Picker("显示模式", selection: displayModeBinding) {
+                        Label("列表", systemImage: "list.bullet").tag(FileDisplayMode.list)
+                        Label("缩略图", systemImage: "square.grid.2x2").tag(FileDisplayMode.grid)
+                    }
+                } label: {
+                    Label("显示模式", systemImage: displayMode.iconName)
+                }
+            }
+
+            if supportsFileOperations {
+                Button(isSelectionMode ? "完成" : "选择") {
+                    isSelectionMode ? clearSelection() : beginSelection()
+                }
+                .disabled(isLoading || visibleItems.isEmpty)
+            }
         }
     }
 
@@ -574,8 +580,8 @@ private struct FileOperationSelection: Identifiable {
 }
 
 private struct FileListView: View {
-    @State private var navigationPath: [String] = []
-    @State private var itemsByPath: [String: [SynologyFileItem]] = [:]
+    @State private var navigationPath: [FolderPageSnapshot] = []
+    @State private var rootItemsSnapshot: [SynologyFileItem]?
     @State private var scrollPositions: [String: String] = [:]
 
     let currentPath: String
@@ -585,8 +591,8 @@ private struct FileListView: View {
     @Binding var selectedItemIDs: Set<String>
     let displayMode: FileDisplayMode
     let thumbnailURLAction: (SynologyFileItem) -> URL?
-    let refreshAction: () async -> Void
-    let openFolderAction: (SynologyFileItem) -> Void
+    let refreshAction: (String) async -> [SynologyFileItem]?
+    let openFolderAction: (SynologyFileItem) async -> [SynologyFileItem]?
     let backAction: () -> Void
     let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
     let saveImageAction: (SynologyFileItem) -> Void
@@ -596,29 +602,27 @@ private struct FileListView: View {
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
-            browserPage(path: "", items: itemsByPath[""] ?? items)
+            browserPage(path: "", items: rootItemsSnapshot ?? items)
                 .navigationTitle("文件")
-                .navigationDestination(for: String.self) { path in
-                    browserPage(path: path, items: itemsByPath[path] ?? [])
-                        .navigationTitle(URL(fileURLWithPath: path).lastPathComponent)
+                .navigationDestination(for: FolderPageSnapshot.self) { page in
+                    browserPage(path: page.path, items: page.items)
+                        .navigationTitle(URL(fileURLWithPath: page.path).lastPathComponent)
                 }
         }
         .onAppear {
-            if itemsByPath[""] == nil {
-                itemsByPath[""] = items
+            if rootItemsSnapshot == nil {
+                rootItemsSnapshot = items
             }
-            synchronizeNavigationPath(to: currentPath)
         }
-        .onChange(of: currentPath) { _, newPath in
-            itemsByPath[newPath] = items
-            synchronizeNavigationPath(to: newPath)
-        }
-        .onChange(of: items) { _, newItems in
-            itemsByPath[currentPath] = newItems
+        .task {
+            if rootItemsSnapshot?.isEmpty != false,
+               let loadedItems = await refreshAction("") {
+                rootItemsSnapshot = loadedItems
+            }
         }
         .onChange(of: navigationPath) { oldPath, newPath in
             guard newPath.count < oldPath.count else { return }
-            let destinationPath = newPath.last ?? ""
+            let destinationPath = newPath.last?.path ?? ""
             if destinationPath != currentPath {
                 backAction()
             }
@@ -636,8 +640,18 @@ private struct FileListView: View {
             selectedItemIDs: $selectedItemIDs,
             displayMode: displayMode,
             thumbnailURLAction: thumbnailURLAction,
-            refreshAction: refreshAction,
-            openFolderAction: openFolderAction,
+            refreshAction: {
+                guard let refreshedItems = await refreshAction(path) else { return }
+                updateSnapshot(path: path, items: refreshedItems)
+            },
+            openFolderAction: { item in
+                Task {
+                    guard let loadedItems = await openFolderAction(item) else { return }
+                    if navigationPath.last?.path != item.path {
+                        navigationPath.append(FolderPageSnapshot(path: item.path, items: loadedItems))
+                    }
+                }
+            },
             previewAction: previewAction,
             saveImageAction: saveImageAction,
             renameRequestAction: renameRequestAction,
@@ -646,21 +660,14 @@ private struct FileListView: View {
         )
     }
 
-    private func synchronizeNavigationPath(to path: String) {
+    private func updateSnapshot(path: String, items: [SynologyFileItem]) {
         if path.isEmpty {
-            if !navigationPath.isEmpty {
-                navigationPath.removeAll()
-            }
+            rootItemsSnapshot = items
             return
         }
 
-        if let existingIndex = navigationPath.firstIndex(of: path) {
-            let removalStart = navigationPath.index(after: existingIndex)
-            if removalStart < navigationPath.endIndex {
-                navigationPath.removeSubrange(removalStart..<navigationPath.endIndex)
-            }
-        } else {
-            navigationPath.append(path)
+        if let index = navigationPath.firstIndex(where: { $0.path == path }) {
+            navigationPath[index].items = items
         }
     }
 
@@ -674,8 +681,8 @@ private struct FileListView: View {
 }
 
 private struct FavoriteListView: View {
-    @State private var navigationPath: [String] = []
-    @State private var itemsByPath: [String: [SynologyFileItem]] = [:]
+    @State private var navigationPath: [FolderPageSnapshot] = []
+    @State private var rootItemsSnapshot: [SynologyFileItem]?
     @State private var scrollPositions: [String: String] = [:]
 
     let currentPath: String
@@ -686,8 +693,8 @@ private struct FavoriteListView: View {
     @Binding var selectedItemIDs: Set<String>
     let displayMode: FileDisplayMode
     let thumbnailURLAction: (SynologyFileItem) -> URL?
-    let refreshAction: () async -> Void
-    let openFolderAction: (SynologyFileItem) -> Void
+    let refreshAction: (String) async -> [SynologyFileItem]?
+    let openFolderAction: (SynologyFileItem) async -> [SynologyFileItem]?
     let backAction: () -> Void
     let previewAction: (SynologyFileItem, [SynologyFileItem]) -> Void
     let saveImageAction: (SynologyFileItem) -> Void
@@ -706,36 +713,29 @@ private struct FavoriteListView: View {
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
-            browserPage(path: "", items: itemsByPath[""] ?? rootItems)
+            browserPage(path: "", items: rootItemsSnapshot ?? rootItems)
                 .navigationTitle("收藏夹")
-                .navigationDestination(for: String.self) { path in
-                    browserPage(path: path, items: itemsByPath[path] ?? [])
-                        .navigationTitle(URL(fileURLWithPath: path).lastPathComponent)
+                .navigationDestination(for: FolderPageSnapshot.self) { page in
+                    browserPage(path: page.path, items: page.items)
+                        .navigationTitle(URL(fileURLWithPath: page.path).lastPathComponent)
                 }
         }
         .onAppear {
-            if itemsByPath[""] == nil {
-                itemsByPath[""] = rootItems
-            }
-            synchronizeNavigationPath(to: currentPath)
-        }
-        .onChange(of: currentPath) { _, newPath in
-            itemsByPath[newPath] = currentItems
-            synchronizeNavigationPath(to: newPath)
-        }
-        .onChange(of: currentItems) { _, newItems in
-            itemsByPath[currentPath] = newItems
-        }
-        .onChange(of: navigationPath) { oldPath, newPath in
-            guard newPath.count < oldPath.count else { return }
-            let destinationPath = newPath.last ?? ""
-            if destinationPath != currentPath {
-                backAction()
+            if rootItemsSnapshot == nil {
+                rootItemsSnapshot = rootItems
             }
         }
         .task {
-            if isRoot {
-                loadFavoritesAction()
+            if rootItemsSnapshot?.isEmpty != false,
+               let loadedItems = await refreshAction("") {
+                rootItemsSnapshot = loadedItems
+            }
+        }
+        .onChange(of: navigationPath) { oldPath, newPath in
+            guard newPath.count < oldPath.count else { return }
+            let destinationPath = newPath.last?.path ?? ""
+            if destinationPath != currentPath {
+                backAction()
             }
         }
     }
@@ -753,8 +753,18 @@ private struct FavoriteListView: View {
             selectedItemIDs: $selectedItemIDs,
             displayMode: displayMode,
             thumbnailURLAction: thumbnailURLAction,
-            refreshAction: refreshAction,
-            openFolderAction: openFolderAction,
+            refreshAction: {
+                guard let refreshedItems = await refreshAction(path) else { return }
+                updateSnapshot(path: path, items: refreshedItems)
+            },
+            openFolderAction: { item in
+                Task {
+                    guard let loadedItems = await openFolderAction(item) else { return }
+                    if navigationPath.last?.path != item.path {
+                        navigationPath.append(FolderPageSnapshot(path: item.path, items: loadedItems))
+                    }
+                }
+            },
             previewAction: previewAction,
             saveImageAction: saveImageAction,
             renameRequestAction: renameRequestAction,
@@ -763,21 +773,14 @@ private struct FavoriteListView: View {
         )
     }
 
-    private func synchronizeNavigationPath(to path: String) {
+    private func updateSnapshot(path: String, items: [SynologyFileItem]) {
         if path.isEmpty {
-            if !navigationPath.isEmpty {
-                navigationPath.removeAll()
-            }
+            rootItemsSnapshot = items
             return
         }
 
-        if let existingIndex = navigationPath.firstIndex(of: path) {
-            let removalStart = navigationPath.index(after: existingIndex)
-            if removalStart < navigationPath.endIndex {
-                navigationPath.removeSubrange(removalStart..<navigationPath.endIndex)
-            }
-        } else {
-            navigationPath.append(path)
+        if let index = navigationPath.firstIndex(where: { $0.path == path }) {
+            navigationPath[index].items = items
         }
     }
 
@@ -787,6 +790,25 @@ private struct FavoriteListView: View {
         } set: { newValue in
             scrollPositions[path] = newValue
         }
+    }
+}
+
+@Observable
+private final class FolderPageSnapshot: Hashable {
+    let path: String
+    var items: [SynologyFileItem]
+
+    init(path: String, items: [SynologyFileItem]) {
+        self.path = path
+        self.items = items
+    }
+
+    static func == (lhs: FolderPageSnapshot, rhs: FolderPageSnapshot) -> Bool {
+        lhs === rhs
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(self))
     }
 }
 
